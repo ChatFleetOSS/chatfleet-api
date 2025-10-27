@@ -1,0 +1,51 @@
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
+
+# Environment
+.env
+.env.local
+.env.*.local
+*.env
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.venv*/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+.cache/
+.coverage
+.coverage.*
+htmlcov/
+
+# Node
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# App-generated and artifacts
+var/
+.ragindex/
+uploads/
+logs/
+pact-logs/
+pacts/
+dist/
+build/
+
+# Data (large demo/test corpora)
+data/
+!data/.keep
+
+# Misc
+coverage.xml
+sbom-*.json
+*.log
+*.db
+*.sqlite

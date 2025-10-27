@@ -1,0 +1,20 @@
+{
+  "name": "chatfleet-contracts",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "jest",
+    "pact:consumer": "jest tests/contract/consumer --runInBand",
+    "pact:provider": "node tests/contract/provider/verify.pact.js",
+    "pact:all": "npm run pact:consumer && npm run pact:provider"
+  },
+  "devDependencies": {
+    "@pact-foundation/pact": "^12.0.0",
+    "@types/jest": "^29.5.12",
+    "jest": "^29.7.0",
+    "ts-jest": "^29.2.5",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.6.3",
+    "zod": "^3.23.8"
+  }
+}

@@ -1,0 +1,56 @@
+Recap — ChatFleet Backend (MVP v0.1.1)
+=====================================
+
+Environment
+-----------
+- MongoDB running locally (127.0.0.1:27017) with `chatfleet` database.
+- FastAPI backend (`uvicorn main:app --reload --port 8000`) serving the `/api` surface.
+
+Auth & Users
+------------
+- `/api/auth/register`, `/api/auth/login`, `/api/auth/me` working with bcrypt_sha256 hashes (PasswordContext), HS256 JWTs, corr_id on responses.
+- Alice (`alice@example.com` / `supersecure`) and seeded admin (`admin@chatfleet.local` / `adminpass`) created; admin login tested.
+- `/api/admin/users` returns paginated list with corr_id; schema includes `_id`, email, role, rags, timestamps.
+
+RAG Lifecycle
+-------------
+- Inserted `policies` RAG (slug) in Mongo.
+- `/api/rag/upload` accepts multipart PDF (tested with long HR policies PDF), returns job_id, corr_id.
+- Background job pipeline (chunking → indexing) works: job status endpoint shows queued→running→done; doc status ends at `indexed` with chunk_count=3; FAISS index written to `var/faiss`.
+- `/api/rag/index/status` reports progress; `/api/rag/rebuild` replays chunk count and finishes with job result; `/api/rag/reset` clears docs/index, confirming confirmation guard.
+
+Access Control
+--------------
+- `/api/rag/users/add` validated (Pydantic mode=before) and returns corr_id. Alice granted access to `policies`.
+- `RagUserUpsertRequest` enforces exactly one of `user_id` or `email`.
+
+Chat
+----
+- `/api/chat` returns structured response with placeholder answer, citations array, usage, corr_id.
+- `/api/chat/stream` tested (SSE events: ready → chunk* → citations → done → ping) with Alice token.
+
+Jobs
+----
+- `/api/jobs/{id}` verified for both indexing and rebuild jobs.
+
+Admin Config
+------------
+- `/api/admin/config` returns sanitized environment (chat model, embed model, local `var/` paths, upload limits).
+
+Logging & Corr ID
+-----------------
+- Corr_id middleware attaches x-corr-id & x-response-time headers, used in envelopes and SystemLog writes (async log helper).
+
+TypeScript Contracts & Pact
+---------------------------
+- Added `schemas/index.ts` with Zod definitions matching backend/OpenAPI.
+- Added `package.json`, `tsconfig.json`, `jest.config.ts`, and `tests/contract` folder for pact consumer/provider tests.
+- Consumer pacts for `/api/chat` and `/api/rag/upload` pass (`npm run pact:consumer`). Provider verifier scaffold (`npm run pact:provider`) ready.
+- Contract workflow documented in `tests/contract/README.md`.
+- Dependencies installed via `npm install`.
+
+Next Steps for Frontend
+-----------------------
+- Consume the Zod schema package (`schemas/index.ts`) as the shared type source.
+- Use generated pacts (`pacts/ChatFleet-Frontend-ChatFleet-API.json`) to drive frontend integration tests or publish to pact broker.
+- Implement frontend features (auth flows, RAG upload UI, chat interface) aligned with endpoints above.
