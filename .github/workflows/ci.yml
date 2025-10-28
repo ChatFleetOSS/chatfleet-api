@@ -121,6 +121,64 @@ jobs:
       - name: Cosign sign (keyless)
         run: cosign sign --yes ${{ env.IMAGE_REF }}:${{ github.ref_name }}
 
+  provider-verify:
+    name: Provider Verify (Pact)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      mongo:
+        image: mongo:6
+        ports:
+          - 27017:27017
+        options: >-
+          --health-cmd="mongosh --quiet --eval 'db.runCommand({ ping: 1 }).ok'"
+          --health-interval 10s --health-timeout 5s --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Install API deps
+        working-directory: .
+        run: |
+          pip install --no-cache-dir -r requirements.txt
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install Pact deps
+        run: npm ci --no-audit --no-fund
+
+      - name: Boot API and wait for health
+        env:
+          MONGO_URI: mongodb://localhost:27017/chatfleet
+          AUTO_START_MONGO: "0"
+          JWT_SECRET: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+          OPENAI_API_KEY: ""
+        run: |
+          nohup uvicorn main:app --host 0.0.0.0 --port 8000 --proxy-headers > api.log 2>&1 &
+          for i in $(seq 1 60); do
+            if curl -fsS http://localhost:8000/api/health >/dev/null 2>&1; then
+              echo "API healthy"; break; fi; sleep 2; done
+          curl -fsS http://localhost:8000/api/health
+
+      - name: Verify provider pact
+        run: npm run pact:provider
+
+      - name: Upload API log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: provider-api-log
+          path: api.log
+
   push-edge:
     needs: build-test-scan
     if: github.ref == 'refs/heads/main'
