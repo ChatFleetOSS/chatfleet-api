@@ -16,6 +16,11 @@ env:
   IMAGE_REF: ghcr.io/chatfleetoss/chatfleet-api
 
 jobs:
+  sanity:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: echo "sanity ok"
   build-test-scan:
     runs-on: ubuntu-latest
     steps:
