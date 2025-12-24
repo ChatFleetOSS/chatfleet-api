@@ -25,6 +25,18 @@ jobs:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Login to GHCR with PAT (optional)
+        env:
+          REGISTRY: ${{ env.REGISTRY }}
+          GHCR_USERNAME: ${{ secrets.GHCR_USERNAME }}
+          GHCR_PAT: ${{ secrets.GHCR_PAT }}
+        run: |
+          if [ -n "${GHCR_USERNAME}" ] && [ -n "${GHCR_PAT}" ]; then
+            echo "Using PAT login for GHCR"
+            echo "${GHCR_PAT}" | docker login "${REGISTRY}" -u "${GHCR_USERNAME}" --password-stdin
+          else
+            echo "No PAT provided; continuing with default token login"
+          fi
       - name: Docker metadata
         id: meta
         uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051
