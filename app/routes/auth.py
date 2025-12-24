@@ -10,7 +10,8 @@ from pymongo.errors import DuplicateKeyError
 
 from app.dependencies.auth import authenticate_user, create_access_token, get_current_user
 from app.models.auth import AuthResponse, LoginRequest, RegisterRequest, UserPublic
-from app.services.users import create_user_from_register, user_to_public
+from app.services.users import create_user_from_register, user_to_public, find_user_by_email
+from app.services.promotions import apply_if_pending
 from app.utils.responses import raise_http_error, with_corr_id
 from app.utils.responses import with_corr_id
 
@@ -23,6 +24,14 @@ async def register(payload: RegisterRequest) -> AuthResponse:
         doc = await create_user_from_register(payload)
     except DuplicateKeyError:
         raise_http_error("EMAIL_EXISTS", "Email already registered", status.HTTP_400_BAD_REQUEST)
+    # Apply any pending admin promotion for this email before issuing the token
+    try:
+        await apply_if_pending(payload.email, user_id=str(doc["_id"]))
+        # Refresh user if role changed
+        doc = await find_user_by_email(payload.email) or doc
+    except Exception:
+        # Defensive: do not block registration on promotion logic
+        pass
     token = create_access_token(doc)
     payload_dict = {"token": token, "user": user_to_public(doc)}
     return AuthResponse(**with_corr_id(payload_dict))
@@ -31,6 +40,17 @@ async def register(payload: RegisterRequest) -> AuthResponse:
 @router.post("/login", response_model=AuthResponse)
 async def login(payload: LoginRequest) -> AuthResponse:
     user = await authenticate_user(payload.email, payload.password)
+    # Apply pending admin promotion (if any) prior to creating the token
+    try:
+        applied = await apply_if_pending(payload.email, user_id=str(user.get("_id")))
+        if applied:
+            # Reload to capture updated role
+            refreshed = await find_user_by_email(payload.email)
+            if refreshed:
+                user = refreshed
+    except Exception:
+        # Defensive: do not fail login on promotion logic
+        pass
     token = create_access_token(user)
     payload_dict = {"token": token, "user": user_to_public(user)}
     return AuthResponse(**with_corr_id(payload_dict))

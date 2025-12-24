@@ -26,10 +26,16 @@ This guide enumerates every `/api` endpoint exposed by the ChatFleet backend and
   }
   ```
 
+Notes:
+- If an admin promotion intent exists for this email (created by the installer), the backend upgrades the role to `admin` during registration and the returned token/user reflect the admin role immediately.
+
 ### `POST /api/auth/login`
 - **Access:** Public.
 - **Body:** Same shape as register without `name`.
 - **Response 200:** Auth token + user payload identical to register.
+
+Notes:
+- If an admin promotion intent exists for the email, the backend redeems it at login before issuing the token so the user sees the admin UI right away.
 
 ### `GET /api/auth/me`
 - **Access:** Bearer required.
