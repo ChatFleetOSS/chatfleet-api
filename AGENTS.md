@@ -10,7 +10,8 @@ This backend powers ChatFleet’s multi-RAG services with FastAPI and contract t
 - `tests/contract/` delivers Pact suites; `pacts/` and `pact-logs/` hold generated artifacts for review.
 
 ## Build, Test, and Development Commands
-- `uvicorn main:app --reload` runs the FastAPI server with hot reload for local development.
+- `bash dev.sh` or `make dev-backend` runs the FastAPI server with hot reload, ensuring venv + sensible env (uses localhost Mongo).
+- `uvicorn main:app --reload` runs the server if you have already exported env vars.
 - `npm test` executes the Jest suite.
 - `npm run pact:consumer` exercises consumer contracts under `tests/contract/consumer`.
 - `npm run pact:provider` verifies the provider implementation via `ts-node`.

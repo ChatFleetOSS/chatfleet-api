@@ -23,6 +23,21 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+      - name: Python lint (ruff) and syntax check
+        run: |
+          pip install --no-cache-dir ruff
+          ruff --version
+          ruff check backend
+          python -m compileall -q backend
+      - name: Type check (mypy, non-blocking)
+        run: |
+          pip install --no-cache-dir mypy
+          mypy --ignore-missing-imports --no-strict-optional --install-types --non-interactive backend || true
       - name: Node setup (for Pact tests)
         uses: actions/setup-node@v4
         with:
@@ -171,6 +186,10 @@ jobs:
             if curl -fsS http://localhost:8000/api/health >/dev/null 2>&1; then
               echo "API healthy"; break; fi; sleep 2; done
           curl -fsS http://localhost:8000/api/health
+      - name: Smoke test (register/login/me)
+        run: |
+          pip install --no-cache-dir httpx
+          python scripts/ci_smoke.py --base http://localhost:8000/api
 
       - name: Verify provider pact
         run: npm run pact:provider
