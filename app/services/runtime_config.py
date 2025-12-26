@@ -66,7 +66,14 @@ def _dec(token: Optional[str]) -> Optional[str]:
 
 async def ensure_indexes() -> None:
     col = _col()
-    await col.create_index("_id", unique=True)
+    # MongoDB enforces a unique index on _id automatically; creating one with
+    # options raises an error. Keep a lightweight index on verified_at to
+    # support potential future queries, but it's not required.
+    try:
+        await col.create_index("verified_at")
+    except Exception:
+        # Defensive: ignore index creation failures in dev environments.
+        pass
 
 
 async def get_llm_config() -> LLMConfigView:
@@ -128,4 +135,3 @@ async def set_verified(ok: bool) -> None:
     col = _col()
     await col.update_one({"_id": "runtime"}, {"$set": {"verified_at": datetime.now(timezone.utc)}})
     _invalidate_cache()
-
