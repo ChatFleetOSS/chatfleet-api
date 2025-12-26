@@ -12,6 +12,7 @@ from .jobs import router as jobs_router
 from .rag import router as rag_router
 from .rag_admin import router as rag_admin_router
 from .health import router as health_router
+from .admin_llm import router as admin_llm_router
 
 
 def register_routes(app: FastAPI) -> None:
@@ -23,4 +24,5 @@ def register_routes(app: FastAPI) -> None:
     app.include_router(jobs_router, prefix="/api")
     app.include_router(admin_users_router, prefix="/api")
     app.include_router(admin_config_router, prefix="/api")
+    app.include_router(admin_llm_router, prefix="/api")
     app.include_router(health_router, prefix="/api")

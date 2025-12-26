@@ -14,6 +14,7 @@ from typing import Iterable, List
 import numpy as np
 
 from app.core.config import settings
+from app.services.runtime_config import get_llm_config, get_api_key
 
 try:
     from openai import OpenAI
@@ -55,7 +56,16 @@ async def embed_texts(texts: Iterable[str]) -> List[List[float]]:
     if not items:
         return []
 
+    # prefer runtime configuration when available
     client = _ensure_client()
+    if client is None:
+        try:
+            cfg = await get_llm_config()
+            key = os.getenv("OPENAI_API_KEY") or (await get_api_key())
+            if key and OpenAI is not None:
+                client = OpenAI(api_key=key, base_url=cfg.base_url)  # type: ignore[call-arg]
+        except Exception:
+            client = None
     if client is None:
         return [_deterministic_embedding(text) for text in items]
 
