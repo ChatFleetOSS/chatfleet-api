@@ -115,9 +115,13 @@ async def set_llm_config(payload: LLMConfigUpdateRequest, actor_id: str) -> LLMC
         "updated_by": actor_id,
         "updated_at": datetime.now(timezone.utc),
     }
-    if payload.api_key:
-        doc["api_key_enc"] = _enc(payload.api_key)
-    await col.update_one({"_id": "runtime"}, {"$set": doc}, upsert=True)
+    update: Dict[str, Any] = {"$set": doc}
+    if payload.api_key is not None:
+        if payload.api_key == "":
+            update["$unset"] = {"api_key_enc": ""}
+        else:
+            update["$set"]["api_key_enc"] = _enc(payload.api_key)
+    await col.update_one({"_id": "runtime"}, update, upsert=True)
     _invalidate_cache()
     cfg = await get_llm_config()
     return cfg
