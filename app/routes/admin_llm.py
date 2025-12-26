@@ -8,9 +8,11 @@ from app.models.admin import (
     LLMConfigUpdateRequest,
     LLMConfigTestRequest,
     LLMConfigTestResult,
+    LLMModelsRequest,
+    LLMModelsResponse,
 )
 from app.services.runtime_config import get_llm_config, set_llm_config, set_verified
-from app.services.llm import test_chat_completion_provider
+from app.services.llm import test_chat_completion_provider, discover_models
 from app.utils.responses import with_corr_id
 
 router = APIRouter(prefix="/admin/llm", tags=["Admin LLM Config"])
@@ -35,3 +37,12 @@ async def put_config(payload: LLMConfigUpdateRequest, current_user = Depends(req
     await set_verified(ok)
     return LLMConfigResponse(**with_corr_id({"config": cfg}))
 
+
+@router.post("/config/models", response_model=LLMModelsResponse)
+async def post_models(payload: LLMModelsRequest, current_user = Depends(require_admin)) -> LLMModelsResponse:
+    chat, emb, raw = await discover_models(payload.provider, payload.base_url, payload.api_key)
+    return LLMModelsResponse(**with_corr_id({
+        "chat_models": chat,
+        "embed_models": emb,
+        "raw_models": raw,
+    }))

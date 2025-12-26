@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import os
 from typing import Dict, List, Optional, Tuple
+from functools import partial
 
 try:
     from openai import OpenAI
@@ -56,8 +57,10 @@ async def generate_chat_completion(
         from app.services.runtime_config import get_llm_config, get_api_key as _get_key
         cfg = await get_llm_config()
         key = os.getenv("OPENAI_API_KEY") or (await _get_key())
-        if key and OpenAI is not None:
-            client = OpenAI(api_key=key, base_url=cfg.base_url)  # type: ignore[call-arg]
+        # For vLLM, an API key may be optional but OpenAI client requires a non-empty string.
+        eff_key = key or ("sk-ignored" if cfg.provider == "vllm" else None)
+        if eff_key and OpenAI is not None:
+            client = OpenAI(api_key=eff_key, base_url=cfg.base_url)  # type: ignore[call-arg]
         else:
             client = _ensure_client_env_only()
     except Exception:
@@ -67,9 +70,9 @@ async def generate_chat_completion(
 
     loop = asyncio.get_running_loop()
 
-    def _call() -> Tuple[str, int]:
+    def _call(model_name: str) -> Tuple[str, int]:
         response = client.chat.completions.create(
-            model=settings.chat_model,
+            model=model_name,
             messages=messages,
             temperature=temperature,
             max_tokens=max_tokens,
@@ -87,31 +90,120 @@ async def generate_chat_completion(
         return text, completion_tokens
 
     try:
-        return await loop.run_in_executor(None, _call)
+        cfg = await get_llm_config()
+        model_name = cfg.chat_model or settings.chat_model
+        return await loop.run_in_executor(None, partial(_call, model_name))
     except Exception:
         return None
 
 
 async def test_chat_completion_provider(payload: LLMConfigTestRequest) -> tuple[bool, str | None]:
+    """Verify connectivity and basic capability to the configured provider.
+
+    - For provider 'openai': require an API key; attempt `models.list()` first, then a 1-token completion.
+    - For provider 'vllm': require a base_url; use a dummy key if none provided; attempt `models.list()`.
+    A strict overall timeout of ~15s is enforced by running calls in a thread and awaiting with wait_for.
+    """
     if OpenAI is None:
-        return False, "openai client not available"
+        return False, "Client not available: install openai package"
+
+    provider = payload.provider
+    base_url = payload.base_url
     key = payload.api_key or os.getenv("OPENAI_API_KEY") or (await get_api_key())
-    if not key:
-        return False, "missing API key"
+
+    if provider == "openai" and not key:
+        return False, "AUTH_ERROR: missing API key"
+    if provider == "vllm" and not base_url:
+        return False, "CONFIG_ERROR: missing base_url for vLLM"
+
+    eff_key = key or ("sk-ignored" if provider == "vllm" else "")
     try:
-        client = OpenAI(api_key=key, base_url=payload.base_url)  # type: ignore[call-arg]
-        # Prefer a cheap models call when available
-        try:
+        client = OpenAI(api_key=eff_key, base_url=base_url)  # type: ignore[call-arg]
+
+        loop = asyncio.get_running_loop()
+
+        def _list_models() -> bool:
             _ = client.models.list()
-            return True, None
+            return True
+
+        async def _run_with_timeout(fn) -> bool:
+            return await asyncio.wait_for(loop.run_in_executor(None, fn), timeout=15)
+
+        try:
+            ok = await _run_with_timeout(_list_models)
+            if ok:
+                return True, None
         except Exception:
-            # Fallback to a 1-token completion
-            _ = client.chat.completions.create(
-                model=payload.chat_model or settings.chat_model,
-                messages=[{"role": "user", "content": "ping"}],
-                max_tokens=1,
-                temperature=0,
-            )
-            return True, None
+            # Try a tiny completion for providers that support chat
+            try:
+                def _tiny_completion() -> bool:
+                    _ = client.chat.completions.create(
+                        model=(payload.chat_model or settings.chat_model),
+                        messages=[{"role": "user", "content": "ping"}],
+                        max_tokens=1,
+                        temperature=0,
+                    )
+                    return True
+
+                ok2 = await _run_with_timeout(_tiny_completion)
+                if ok2:
+                    return True, None
+            except Exception as exc2:
+                # Map common errors
+                msg = str(exc2)
+                if "401" in msg or "Unauthorized" in msg:
+                    return False, "AUTH_ERROR: unauthorized"
+                if "timed out" in msg or "Timeout" in msg:
+                    return False, "TIMEOUT: provider did not respond"
+                if "Not Found" in msg or "404" in msg:
+                    return False, "INVALID_ENDPOINT: check base_url"
+                return False, f"PROVIDER_ERROR: {msg}"
+
+        # If we got here, listing failed without exception context
+        return False, "CONNECTION_ERROR: unable to reach provider"
     except Exception as exc:  # pragma: no cover
-        return False, str(exc)
+        msg = str(exc)
+        if "API key" in msg and (provider == "openai"):
+            return False, "AUTH_ERROR: missing or invalid API key"
+        if "Name or service not known" in msg or "Failed to establish a new connection" in msg:
+            return False, "CONNECTION_ERROR: check base_url/network"
+        return False, f"PROVIDER_ERROR: {msg}"
+
+
+async def discover_models(provider: str, base_url: Optional[str], api_key: Optional[str]) -> tuple[list[str], list[str], list[str]]:
+    """Return (chat_models, embedding_models, raw_models).
+
+    Uses the OpenAI-compatible /v1/models when available. For vLLM, base_url is required.
+    """
+    if OpenAI is None:
+        return [], [], []
+    if provider == "vllm" and not base_url:
+        return [], [], []
+
+    key = api_key or os.getenv("OPENAI_API_KEY") or (await get_api_key())
+    eff_key = key or ("sk-ignored" if provider == "vllm" else "")
+    try:
+        client = OpenAI(api_key=eff_key, base_url=base_url)  # type: ignore[call-arg]
+        loop = asyncio.get_running_loop()
+
+        def _list() -> list[str]:
+            return [m.id for m in client.models.list().data]
+
+        ids = await asyncio.wait_for(loop.run_in_executor(None, _list), timeout=15)
+    except Exception:
+        return [], [], []
+
+    raw = list(ids)
+    embed_keywords = [
+        "embedding",
+        "embed",
+        "text-embedding",
+        "e5",
+        "bge",
+        "jina",
+        "gte",
+        "nomic",
+    ]
+    emb = [m for m in ids if any(k in m.lower() for k in embed_keywords)]
+    chat = [m for m in ids if m not in emb]
+    return chat, emb, raw

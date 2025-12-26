@@ -62,8 +62,10 @@ async def embed_texts(texts: Iterable[str]) -> List[List[float]]:
         try:
             cfg = await get_llm_config()
             key = os.getenv("OPENAI_API_KEY") or (await get_api_key())
-            if key and OpenAI is not None:
-                client = OpenAI(api_key=key, base_url=cfg.base_url)  # type: ignore[call-arg]
+            # For vLLM, allow missing key by providing a dummy value.
+            eff_key = key or ("sk-ignored" if cfg.provider == "vllm" else None)
+            if eff_key and OpenAI is not None:
+                client = OpenAI(api_key=eff_key, base_url=cfg.base_url)  # type: ignore[call-arg]
         except Exception:
             client = None
     if client is None:
@@ -71,12 +73,14 @@ async def embed_texts(texts: Iterable[str]) -> List[List[float]]:
 
     loop = asyncio.get_running_loop()
 
-    def _call() -> List[List[float]]:
-        response = client.embeddings.create(model=settings.embed_model, input=list(items))
+    def _call(model_name: str) -> List[List[float]]:
+        response = client.embeddings.create(model=model_name, input=list(items))
         return [row.embedding for row in response.data]
 
     try:
-        return await loop.run_in_executor(None, _call)
+        cfg = await get_llm_config()
+        model_name = cfg.embed_model or settings.embed_model
+        return await loop.run_in_executor(None, lambda: _call(model_name))
     except Exception:
         return [_deterministic_embedding(text) for text in items]
 
