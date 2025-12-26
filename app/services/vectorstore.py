@@ -15,7 +15,7 @@ from typing import List, Sequence
 import faiss
 import numpy as np
 
-from app.core.config import settings
+from app.services.runtime_config import get_runtime_overrides_sync
 
 DOC_BUCKET = "docs"
 INDEX_FILE = "index.faiss"
@@ -31,7 +31,8 @@ class ChunkRecord:
 
 
 def _rag_base_dir(rag_slug: str) -> Path:
-    base = settings.index_dir / rag_slug
+    index_dir, _, _, _, _ = get_runtime_overrides_sync()
+    base = index_dir / rag_slug
     base.mkdir(parents=True, exist_ok=True)
     (base / DOC_BUCKET).mkdir(parents=True, exist_ok=True)
     return base

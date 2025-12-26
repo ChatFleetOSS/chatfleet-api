@@ -29,6 +29,9 @@ class LLMConfigView(BaseModel):
     embed_model: str
     temperature_default: float = 0.2
     top_k_default: int = 6
+    index_dir: str
+    upload_dir: str
+    max_upload_mb: int = 50
     has_api_key: bool = False
     verified_at: Optional[datetime] = None
     runtime_enabled: bool = True
@@ -42,6 +45,9 @@ class LLMConfigUpdateRequest(BaseModel):
     embed_model: str
     temperature_default: Optional[float] = None
     top_k_default: Optional[int] = None
+    index_dir: Optional[str] = None
+    upload_dir: Optional[str] = None
+    max_upload_mb: Optional[int] = None
 
 
 class LLMConfigResponse(BaseModel):

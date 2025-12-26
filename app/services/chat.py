@@ -16,8 +16,10 @@ from app.core.config import settings
 from app.core.corr_id import get_corr_id
 from app.models.chat import ChatRequest, ChatResponse, Citation, Usage
 from app.services.embeddings import embed_text
+from app.services.runtime_config import get_llm_config
 from app.services.jobs import JobRecord, job_manager
 from app.services.llm import generate_chat_completion
+from app.services.runtime_config import get_llm_config, get_api_key
 from app.services.logging import write_system_log
 from app.services.rags import get_rag_by_slug
 from app.services.vectorstore import ChunkRecord, query_index
@@ -35,31 +37,8 @@ def _format_hits_for_prompt(hits: Sequence[tuple[float, ChunkRecord]]) -> str:
     return "\n".join(lines)
 
 
-def _fallback_answer(question: str, hits: Sequence[tuple[float, ChunkRecord]]) -> str:
-    if not hits:
-        return (
-            "### Résultat indisponible\n\n"
-            "Je n'ai trouvé aucun document indexé correspondant à cette question. "
-            "Ajoutez ou indexez des documents puis relancez la recherche."
-        )
-    record = hits[0][1]
-    snippet = record.text.replace("\n", " ").strip()
-    snippet = snippet[:360] + ("…" if len(snippet) > 360 else "")
-    rows: List[str] = ["| Source | Extrait clé |", "| --- | --- |"]
-    for _, doc in hits[:3]:
-        shortened = doc.text.replace("\n", " ").strip()
-        shortened = shortened[:200] + ("…" if len(shortened) > 200 else "")
-        safe_text = shortened.replace("|", r"\|")
-        rows.append(f"| `{doc.filename}` | {safe_text} |")
-    table = "\n".join(rows)
-    answer = (
-        f"### Synthèse\n\n"
-        f"**Question :** {question}\n\n"
-        f"{snippet}\n\n"
-        "#### Extraits pertinents\n\n"
-        f"{table}\n"
-    )
-    return _normalize_markdown_tables(answer)
+class LLMUnavailableError(Exception):
+    pass
 
 
 def _normalize_markdown_tables(text: str) -> str:
@@ -291,10 +270,12 @@ async def _generate_answer(
 ) -> Tuple[str, int]:
     question = request.messages[-1].content if request.messages else ""
     messages = _build_prompt_messages(request, hits)
+    # prefer runtime default
+    cfg = await get_llm_config()
     temperature = (
         request.opts.temperature
         if request.opts and request.opts.temperature is not None
-        else settings.temperature_default
+        else cfg.temperature_default
     )
     max_tokens = (
         request.opts.max_tokens if request.opts and request.opts.max_tokens else 500
@@ -310,22 +291,44 @@ async def _generate_answer(
         answer_text = _normalize_markdown_tables(answer_text)
         if answer_text:
             return answer_text, tokens_out
+    # No LLM available or failed
+    raise LLMUnavailableError("LLM_UNAVAILABLE")
 
-    fallback = _fallback_answer(question, hits)
-    estimated_tokens = max(1, len(fallback.split()))
-    return fallback, estimated_tokens
+
+async def _ensure_llm_configured() -> bool:
+    cfg = await get_llm_config()
+    if cfg.provider == "openai":
+        key = await get_api_key()
+        import os
+        return bool(key or os.getenv("OPENAI_API_KEY"))
+    if cfg.provider == "vllm":
+        return bool(cfg.base_url)
+    return False
 
 
 async def handle_chat(request: ChatRequest, user_id: str) -> ChatResponse:
+    if not await _ensure_llm_configured():
+        raise_http_error(
+            "LLM_NOT_CONFIGURED",
+            "LLM provider is not configured. In Admin → Settings, choose OpenAI or vLLM, provide the API key or base URL, then Save. After changing the embedding model, rebuild indexes for best results.",
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+        )
     rag = await get_rag_by_slug(request.rag_slug)
     if not rag:
         raise_http_error("RAG_NOT_FOUND", f"RAG '{request.rag_slug}' not found", status_code=404)
 
-    top_k = request.opts.top_k if request.opts and request.opts.top_k else settings.top_k_default
+    cfg = await get_llm_config()
+    top_k = request.opts.top_k if request.opts and request.opts.top_k else cfg.top_k_default
     last_message = request.messages[-1]
     hits = await _retrieve_hits(request.rag_slug, last_message.content, top_k)
     try:
         answer, tokens_out = await _generate_answer_with_job(request, hits)
+    except LLMUnavailableError:
+        raise_http_error(
+            "LLM_NOT_CONFIGURED",
+            "LLM provider is not configured. In Admin → Settings, choose OpenAI or vLLM, provide the API key or base URL, then Save. After changing the embedding model, rebuild indexes for best results.",
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+        )
     except Exception:
         raise_http_error("CHAT_FAILED", "Unable to generate an answer at this time", status.HTTP_503_SERVICE_UNAVAILABLE)
 
@@ -351,16 +354,29 @@ async def handle_chat(request: ChatRequest, user_id: str) -> ChatResponse:
 
 
 async def stream_chat(request: ChatRequest, user_id: str) -> AsyncGenerator[str, None]:
+    if not await _ensure_llm_configured():
+        raise_http_error(
+            "LLM_NOT_CONFIGURED",
+            "LLM provider is not configured. In Admin → Settings, choose OpenAI or vLLM, provide the API key or base URL, then Save. After changing the embedding model, rebuild indexes for best results.",
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+        )
     rag = await get_rag_by_slug(request.rag_slug)
     if not rag:
         raise_http_error("RAG_NOT_FOUND", f"RAG '{request.rag_slug}' not found", status_code=404)
 
     corr_id = get_corr_id()
     question = request.messages[-1].content
-    top_k = request.opts.top_k if request.opts and request.opts.top_k else settings.top_k_default
+    cfg = await get_llm_config()
+    top_k = request.opts.top_k if request.opts and request.opts.top_k else cfg.top_k_default
     hits = await _retrieve_hits(request.rag_slug, question, top_k)
     try:
         answer, tokens_out = await _generate_answer_with_job(request, hits)
+    except LLMUnavailableError:
+        raise_http_error(
+            "LLM_NOT_CONFIGURED",
+            "LLM provider is not configured. In Admin → Settings, choose OpenAI or vLLM, provide the API key or base URL, then Save. After changing the embedding model, rebuild indexes for best results.",
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+        )
     except Exception:
         raise_http_error("CHAT_FAILED", "Unable to generate an answer at this time", status.HTTP_503_SERVICE_UNAVAILABLE)
 

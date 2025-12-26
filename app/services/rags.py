@@ -38,6 +38,7 @@ from app.services.logging import write_system_log
 from app.services.users import find_user_by_id, update_user_rags
 from app.services.vectorstore import build_index as rebuild_vector_index
 from app.services.vectorstore import persist_doc_payload, remove_doc_payload
+from app.services.runtime_config import get_runtime_overrides_sync
 from app.utils.responses import raise_http_error, with_corr_id
 
 
@@ -238,7 +239,8 @@ async def get_index_status(slug: str) -> IndexStatusResponse:
 
 
 def _save_upload_target(rag_slug: str) -> Path:
-    target_dir = settings.upload_dir / rag_slug
+    _, upload_dir, _, _, _ = get_runtime_overrides_sync()
+    target_dir = upload_dir / rag_slug
     target_dir.mkdir(parents=True, exist_ok=True)
     return target_dir
 
@@ -532,7 +534,8 @@ async def reset_index(rag_slug: str, user_id: str) -> str:
         for doc in rag.get("docs", []):
             remove_doc_payload(rag_slug, doc["doc_id"])
 
-        index_dir = settings.index_dir / rag_slug
+        index_dir, upload_dir_base, _, _, _ = get_runtime_overrides_sync()
+        index_dir = index_dir / rag_slug
         if index_dir.exists():
             for child in index_dir.glob("*"):
                 try:
@@ -546,7 +549,7 @@ async def reset_index(rag_slug: str, user_id: str) -> str:
                 except OSError:
                     pass
 
-        target_dir = settings.upload_dir / rag_slug
+        target_dir = upload_dir_base / rag_slug
         if target_dir.exists():
             for child in target_dir.glob("*"):
                 try:
@@ -623,7 +626,8 @@ async def delete_rag(rag_slug: str, confirmation: str, actor_id: str) -> None:
     for doc in rag.get("docs", []):
         remove_doc_payload(rag_slug, doc["doc_id"])
 
-    index_dir = settings.index_dir / rag_slug
+    index_dir, upload_dir_base, _, _, _ = get_runtime_overrides_sync()
+    index_dir = index_dir / rag_slug
     if index_dir.exists():
         for child in index_dir.glob("*"):
             try:
@@ -641,7 +645,7 @@ async def delete_rag(rag_slug: str, confirmation: str, actor_id: str) -> None:
         except OSError:
             pass
 
-    upload_dir = settings.upload_dir / rag_slug
+    upload_dir = upload_dir_base / rag_slug
     if upload_dir.exists():
         for child in upload_dir.glob("*"):
             try:

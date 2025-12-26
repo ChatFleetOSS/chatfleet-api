@@ -7,6 +7,7 @@ from __future__ import annotations
 import base64
 import os
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
 from cryptography.fernet import Fernet, InvalidToken
@@ -14,6 +15,7 @@ from motor.motor_asyncio import AsyncIOMotorCollection
 
 from app.core.database import get_collection
 from app.models.admin import LLMConfigUpdateRequest, LLMConfigView
+from app.core.config import settings
 
 
 _CACHE: Optional[Tuple[LLMConfigView, datetime]] = None
@@ -89,6 +91,9 @@ async def get_llm_config() -> LLMConfigView:
         embed_model=doc.get("embed_model", "text-embedding-3-small"),
         temperature_default=float(doc.get("temperature_default", 0.2)),
         top_k_default=int(doc.get("top_k_default", 6)),
+        index_dir=str(doc.get("index_dir", settings.index_dir)),
+        upload_dir=str(doc.get("upload_dir", settings.upload_dir)),
+        max_upload_mb=int(doc.get("max_upload_mb", settings.max_upload_mb)),
         has_api_key=bool(doc.get("api_key_enc")),
         verified_at=doc.get("verified_at"),
         runtime_enabled=True,
@@ -112,6 +117,9 @@ async def set_llm_config(payload: LLMConfigUpdateRequest, actor_id: str) -> LLMC
         "embed_model": payload.embed_model,
         "temperature_default": payload.temperature_default if payload.temperature_default is not None else 0.2,
         "top_k_default": payload.top_k_default if payload.top_k_default is not None else 6,
+        "index_dir": str(payload.index_dir) if payload.index_dir is not None else str(settings.index_dir),
+        "upload_dir": str(payload.upload_dir) if payload.upload_dir is not None else str(settings.upload_dir),
+        "max_upload_mb": int(payload.max_upload_mb) if payload.max_upload_mb is not None else int(settings.max_upload_mb),
         "updated_by": actor_id,
         "updated_at": datetime.now(timezone.utc),
     }
@@ -139,3 +147,18 @@ async def set_verified(ok: bool) -> None:
     col = _col()
     await col.update_one({"_id": "runtime"}, {"$set": {"verified_at": datetime.now(timezone.utc)}})
     _invalidate_cache()
+
+
+def get_runtime_overrides_sync() -> tuple[Path, Path, int, float, int]:
+    """Return (index_dir, upload_dir, max_upload_mb, temperature_default, top_k_default).
+
+    Synchronous accessor used by modules that cannot `await`. Falls back to
+    environment-backed settings if runtime cache is not warmed.
+    """
+    cfg = _CACHE[0] if _CACHE else None
+    index_dir = Path(cfg.index_dir) if cfg and getattr(cfg, "index_dir", None) else settings.index_dir
+    upload_dir = Path(cfg.upload_dir) if cfg and getattr(cfg, "upload_dir", None) else settings.upload_dir
+    max_upload_mb = int(cfg.max_upload_mb) if cfg and getattr(cfg, "max_upload_mb", None) else int(settings.max_upload_mb)
+    temperature_default = float(cfg.temperature_default) if cfg and getattr(cfg, "temperature_default", None) else float(settings.temperature_default)
+    top_k_default = int(cfg.top_k_default) if cfg and getattr(cfg, "top_k_default", None) else int(settings.top_k_default)
+    return index_dir, upload_dir, max_upload_mb, temperature_default, top_k_default
