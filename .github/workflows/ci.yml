@@ -215,12 +215,13 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
       - name: Login to GHCR with PAT (optional)
-        if: ${{ secrets.GHCR_PAT != '' && secrets.GHCR_USERNAME != '' }}
-        uses: docker/login-action@5e57cd118135c172c3672efd75eb46360885c0ef
-        with:
-          registry: ${{ env.REGISTRY }}
-          username: ${{ secrets.GHCR_USERNAME }}
-          password: ${{ secrets.GHCR_PAT }}
+        env:
+          REGISTRY: ${{ env.REGISTRY }}
+          GHCR_USERNAME: ${{ secrets.GHCR_USERNAME }}
+          GHCR_PAT: ${{ secrets.GHCR_PAT }}
+        if: ${{ env.GHCR_PAT != '' && env.GHCR_USERNAME != '' }}
+        run: |
+          echo "${GHCR_PAT}" | docker login "${REGISTRY}" -u "${GHCR_USERNAME}" --password-stdin
       - name: Docker metadata (edge)
         id: meta
         uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051
