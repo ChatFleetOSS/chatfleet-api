@@ -38,7 +38,7 @@ from app.services.logging import write_system_log
 from app.services.users import find_user_by_id, update_user_rags
 from app.services.vectorstore import build_index as rebuild_vector_index
 from app.services.vectorstore import persist_doc_payload, remove_doc_payload
-from app.services.runtime_config import get_runtime_overrides_sync
+from app.services.runtime_config import get_runtime_overrides_sync, get_llm_config
 from app.utils.responses import raise_http_error, with_corr_id
 
 
@@ -102,6 +102,26 @@ async def _persist_chunks_and_vectors(
     if not chunks:
         raise ValueError("No textual chunks extracted")
     embeddings = await embed_texts(chunks)
+    # Enforce consistent embedding dimension per RAG
+    dim = len(embeddings[0]) if embeddings and embeddings[0] is not None else 0
+    try:
+        current_rag = await get_rag_by_slug(rag_slug)
+    except Exception:
+        current_rag = None
+    if current_rag:
+        # Prefer existing index dim if built
+        existing_dim = 0
+        idx = current_rag.get("index", {}) if isinstance(current_rag, dict) else {}
+        if isinstance(idx, dict):
+            existing_dim = int(idx.get("dim") or 0)
+        embed_dim_field = int(current_rag.get("embed_dim") or 0)
+        guard_dim = existing_dim or embed_dim_field
+        if guard_dim and dim and guard_dim != dim:
+            raise ValueError(f"EMBED_DIM_MISMATCH: current={dim} existing={guard_dim}")
+        # Persist embed_dim on first embed if not set
+        if not guard_dim and dim:
+            col = get_collection()
+            await col.update_one({"slug": rag_slug}, {"$set": {"embed_dim": int(dim)}})
     persist_doc_payload(rag_slug, doc_entry["doc_id"], doc_entry["filename"], chunks, embeddings)
     return len(chunks)
 
@@ -116,7 +136,8 @@ async def _update_rag_index_summary(rag_slug: str, total_chunks: int, dimension:
                 "index": {
                     "type": "faiss",
                     "path": str(settings.index_dir / rag_slug / "index.faiss"),
-                    "emb_model": settings.embed_model,
+                    # Store runtime embed model name for observability
+                    "emb_model": (await get_llm_config()).embed_model if dimension else settings.embed_model,
                     "dim": dimension,
                     "built_at": datetime.now(timezone.utc),
                 },

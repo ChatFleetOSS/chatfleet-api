@@ -80,3 +80,10 @@ class LLMModelsResponse(BaseModel):
     embed_models: list[str]
     raw_models: list[str]
     corr_id: str
+
+
+class LLMEmbedTestResult(BaseModel):
+    ok: bool
+    dim: Optional[int] = None
+    message: Optional[str] = None
+    corr_id: str

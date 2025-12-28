@@ -88,3 +88,62 @@ async def embed_texts(texts: Iterable[str]) -> List[List[float]]:
 async def embed_text(text: str) -> List[float]:
     (vector,) = await embed_texts([text])
     return vector
+
+
+async def test_embedding_provider(payload: "LLMConfigTestRequest") -> tuple[bool, str | None, int | None]:
+    """Verify the embeddings operation for the configured provider.
+
+    Returns (ok, message, dim).
+    """
+    try:
+        # Lazy import to avoid circular import at module import time
+        from app.models.admin import LLMConfigTestRequest  # noqa: F401
+    except Exception:
+        pass
+
+    if OpenAI is None:
+        return False, "Client not available: install openai package", None
+
+    provider = payload.provider
+    base_url = payload.base_url
+    key = payload.api_key or os.getenv("OPENAI_API_KEY") or (await get_api_key())
+
+    if provider == "openai" and not key:
+        return False, "AUTH_ERROR: missing API key", None
+    if provider == "vllm" and not base_url:
+        return False, "CONFIG_ERROR: missing base_url for vLLM", None
+
+    eff_key = key or ("sk-ignored" if provider == "vllm" else "")
+    try:
+        client = OpenAI(api_key=eff_key, base_url=base_url)  # type: ignore[call-arg]
+        loop = asyncio.get_running_loop()
+
+        def _call() -> int:
+            resp = client.embeddings.create(
+                model=(payload.embed_model or settings.embed_model),
+                input=["hello world"],
+            )
+            return len(resp.data[0].embedding)
+
+        dim = await asyncio.wait_for(loop.run_in_executor(None, _call), timeout=15)
+        return True, None, int(dim)
+    except Exception as exc:  # pragma: no cover
+        msg = str(exc)
+        if "401" in msg or "Unauthorized" in msg:
+            return False, "AUTH_ERROR: unauthorized", None
+        if "timed out" in msg or "Timeout" in msg:
+            return False, "TIMEOUT: provider did not respond", None
+        if "Not Found" in msg or "404" in msg:
+            return False, "INVALID_ENDPOINT: check base_url", None
+        if "model" in msg and "not found" in msg.lower():
+            return False, "INVALID_MODEL: check embedding model id", None
+        return False, f"PROVIDER_ERROR: {msg}", None
+
+
+async def prewarm_embeddings() -> None:
+    """Trigger a small embeddings call to warm caches/startup."""
+    try:
+        _ = await embed_text("hello")
+    except Exception:
+        # Non-fatal; warmup is best effort
+        pass

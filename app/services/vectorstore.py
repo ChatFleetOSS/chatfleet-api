@@ -86,13 +86,17 @@ def build_index(rag_slug: str) -> tuple[int, int]:
     vectors: List[np.ndarray] = []
     metadata: List[ChunkRecord] = []
 
+    dims: set[int] = set()
     for doc_file in sorted(doc_dir.glob("*.pkl")):
         payload = _load_doc_payload(doc_file)
         embeddings = payload.get("embeddings", [])
         chunks = payload.get("chunks", [])
         filename = payload.get("filename", "document")
         for idx, embedding in enumerate(embeddings):
-            vectors.append(np.asarray(embedding, dtype=np.float32))
+            arr = np.asarray(embedding, dtype=np.float32)
+            vectors.append(arr)
+            if arr.ndim == 1:
+                dims.add(int(arr.shape[0]))
             metadata.append(
                 ChunkRecord(
                     doc_id=payload["doc_id"],
@@ -111,6 +115,10 @@ def build_index(rag_slug: str) -> tuple[int, int]:
         if metadata_path.exists():
             metadata_path.unlink()
         return 0, 0
+
+    # Enforce homogeneous dimensions across all vectors
+    if len(dims) > 1:
+        raise ValueError(f"EMBED_DIM_MISMATCH: multiple embedding dimensions detected: {sorted(dims)}")
 
     matrix = np.stack(vectors).astype("float32")
     faiss.normalize_L2(matrix)
