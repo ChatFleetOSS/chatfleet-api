@@ -2,11 +2,15 @@ name: Backend CI (API)
 
 on:
   workflow_dispatch:
+  push:
+    branches: [ main ]
+    tags: [ 'v*.*.*' ]
   pull_request:
     branches: [ main ]
 
 permissions:
   contents: read
+  packages: write
   id-token: write
 
 env:

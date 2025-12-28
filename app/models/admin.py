@@ -67,3 +67,23 @@ class LLMConfigTestResult(BaseModel):
     ok: bool
     message: Optional[str] = None
     corr_id: str
+
+
+class LLMModelsRequest(BaseModel):
+    provider: LLMProvider
+    base_url: Optional[str] = None
+    api_key: Optional[str] = None
+
+
+class LLMModelsResponse(BaseModel):
+    chat_models: list[str]
+    embed_models: list[str]
+    raw_models: list[str]
+    corr_id: str
+
+
+class LLMEmbedTestResult(BaseModel):
+    ok: bool
+    dim: Optional[int] = None
+    message: Optional[str] = None
+    corr_id: str
