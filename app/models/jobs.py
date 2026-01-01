@@ -14,6 +14,14 @@ from .common import UUIDStr
 
 JobType = Literal["RAG_INDEX", "RAG_REBUILD", "RAG_RESET", "CHAT_COMPLETION"]
 JobState = Literal["queued", "running", "done", "error"]
+JobPhase = Literal["queued", "chunking", "embedding", "indexing", "finalizing"]
+
+
+class JobProgressTotals(BaseModel):
+    docs_total: int = Field(ge=0)
+    docs_done: int = Field(ge=0)
+    chunks_total: int = Field(ge=0)
+    chunks_done: int = Field(ge=0)
 
 
 class JobAccepted(BaseModel):
@@ -29,5 +37,7 @@ class JobStatusResponse(BaseModel):
     started_at: Optional[datetime] = None
     finished_at: Optional[datetime] = None
     result: Optional[dict[str, Any]] = None
+    phase: Optional[JobPhase] = None
+    totals: Optional[JobProgressTotals] = None
     error: Optional[str] = None
     corr_id: str

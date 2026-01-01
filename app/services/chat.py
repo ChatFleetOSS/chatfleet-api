@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+import logging
 from typing import Any, AsyncGenerator, Dict, List, Sequence, Tuple
 
 from fastapi import status
@@ -16,7 +17,6 @@ from app.core.config import settings
 from app.core.corr_id import get_corr_id
 from app.models.chat import ChatRequest, ChatResponse, Citation, Usage
 from app.services.embeddings import embed_text
-from app.services.runtime_config import get_llm_config
 from app.services.jobs import JobRecord, job_manager
 from app.services.llm import generate_chat_completion
 from app.services.runtime_config import get_llm_config, get_api_key
@@ -25,16 +25,104 @@ from app.services.rags import get_rag_by_slug
 from app.services.vectorstore import ChunkRecord, query_index
 from app.utils.responses import raise_http_error
 
+logger = logging.getLogger("chatfleet.chat")
+logger.setLevel(logging.INFO)
+retrieval_logger = logging.getLogger("chatfleet.retrieval")
+retrieval_logger.setLevel(logging.INFO)
+prompt_logger = logging.getLogger("chatfleet.prompt")
+prompt_logger.setLevel(logging.INFO)
+RETRIEVAL_MIN_SCORE = 0.2
+CONTEXT_CHAR_BUDGET = 6000
+
 
 def _format_hits_for_prompt(hits: Sequence[tuple[float, ChunkRecord]]) -> str:
     if not hits:
         return "No supporting snippets were retrieved from the knowledge base."
     lines: List[str] = []
-    for idx, (_, record) in enumerate(hits[:5], start=1):
+    for idx, (score, record) in enumerate(hits[:6], start=1):
+        page_hint = ""
+        if record.page_start:
+            if record.page_end and record.page_end != record.page_start:
+                page_hint = f" pages {record.page_start}-{record.page_end}"
+            else:
+                page_hint = f" page {record.page_start}"
+        source = (
+            f"[{idx}] score={score:.3f} doc_id={record.doc_id} file={record.filename}{page_hint}\n"
+            f"{record.text.strip()}"
+        )
+        lines.append(source)
+    return "\n\n".join(lines)
+
+
+def _preview_hits(hits: Sequence[tuple[float, ChunkRecord]], limit: int = 3) -> List[Dict[str, Any]]:
+    previews: List[Dict[str, Any]] = []
+    for score, record in hits[:limit]:
         snippet = record.text.replace("\n", " ").strip()
-        snippet = snippet[:500] + ("…" if len(snippet) > 500 else "")
-        lines.append(f"Source {idx} (doc_id={record.doc_id}, file={record.filename}): {snippet}")
-    return "\n".join(lines)
+        snippet = snippet[:180] + ("…" if len(snippet) > 180 else "")
+        previews.append(
+            {
+                "score": float(score),
+                "doc_id": record.doc_id,
+                "file": record.filename,
+                "page_start": record.page_start,
+                "page_end": record.page_end,
+                "chunk_index": record.chunk_index,
+                "snippet": snippet,
+            }
+        )
+    return previews
+
+
+def _truncate_context(hits: Sequence[tuple[float, ChunkRecord]], budget: int = CONTEXT_CHAR_BUDGET) -> Sequence[tuple[float, ChunkRecord]]:
+    """Limit total context characters to avoid oversized prompts."""
+    total = 0
+    kept: List[tuple[float, ChunkRecord]] = []
+    for pair in hits:
+        text_len = len(pair[1].text)
+        if kept and total + text_len > budget:
+            break
+        kept.append(pair)
+        total += text_len
+    return kept
+
+
+def _topk_log_text(hits: Sequence[tuple[float, ChunkRecord]], limit: int = 10) -> str:
+    parts: List[str] = []
+    for idx, (score, record) in enumerate(hits[:limit], start=1):
+        page_hint = ""
+        if record.page_start:
+            if record.page_end and record.page_end != record.page_start:
+                page_hint = f" pages {record.page_start}-{record.page_end}"
+            else:
+                page_hint = f" page {record.page_start}"
+        parts.append(
+            f"{idx}) score={score:.3f} doc={record.doc_id} file={record.filename}{page_hint} idx={record.chunk_index} len={len(record.text)}\n{record.text.strip()}"
+        )
+    return "\n".join(parts)
+
+
+def _log_prompt_messages(messages: List[Dict[str, str]], rag_slug: str) -> None:
+    corr_id = get_corr_id()
+    try:
+        preview: List[str] = []
+        for idx, msg in enumerate(messages):
+            content = msg.get("content", "")
+            preview.append(f"[{idx}:{msg.get('role','?')}] {content}")
+        prompt_logger.info(
+            "chat.prompt.final corr_id=%s rag=%s count=%s\n%s",
+            corr_id,
+            rag_slug,
+            len(messages),
+            "\n".join(preview),
+            extra={
+                "corr_id": corr_id,
+                "rag_slug": rag_slug,
+                "message_count": len(messages),
+                "prompt_messages": messages,
+            },
+        )
+    except Exception:
+        pass
 
 
 class LLMUnavailableError(Exception):
@@ -173,26 +261,16 @@ def _build_prompt_messages(request: ChatRequest, hits: Sequence[tuple[float, Chu
         {
             "role": "system",
             "content": (
-                "You are ChatFleet, an assistant that answers with factual precision. "
-                "Rely only on the provided knowledge snippets. If the snippets do not "
-                "contain the answer, say you are unsure."
+                "You are a concise assistant. Prefer the provided context to answer. "
+                "If the context is missing or incomplete, answer briefly from your general knowledge and say that sources are unavailable. "
+                "Respond in the user's language using GitHub-flavored Markdown."
             ),
         },
         {
             "role": "system",
             "content": (
-                "Knowledge snippets (do not quote outside of these sources):\n"
+                "Context:\n"
                 f"{context}"
-            ),
-        },
-        {
-            "role": "system",
-            "content": (
-                "Respond in GitHub-flavored Markdown. Use short sections, bullet lists, and tables "
-                "to present data clearly. When emitting tables, insert a single blank line before the block, keep rows contiguous "
-                "with one newline per row (header, separator, and body rows), and keep cells pipe-separated. "
-                "Use a single blank line between paragraphs, and avoid extra blank lines inside tables or lists. "
-                "Do not include a dedicated 'Sources' section; supporting material is sent separately."
             ),
         },
     ]
@@ -201,6 +279,19 @@ def _build_prompt_messages(request: ChatRequest, hits: Sequence[tuple[float, Chu
     history: List[Dict[str, str]] = []
     for message in request.messages[-10:]:
         history.append({"role": message.role, "content": message.content})
+
+    try:
+        logger.info(
+            "chat.prompt",
+            extra={
+                "corr_id": get_corr_id(),
+                "system_count": len(system_messages),
+                "history_count": len(history),
+                "context_preview": context[:500],
+            },
+        )
+    except Exception:
+        pass
 
     return system_messages + history
 
@@ -214,11 +305,16 @@ def _build_citations_from_hits(hits: Sequence[tuple[float, ChunkRecord]]) -> Lis
         seen.add(record.doc_id)
         snippet = record.text.replace("\n", " ")
         snippet = snippet[:280] + ("…" if len(snippet) > 280 else "")
+        if record.page_start:
+            end = record.page_end or record.page_start
+            pages = list(range(record.page_start, end + 1))
+        else:
+            pages = [record.chunk_index + 1]
         citations.append(
             Citation(
                 doc_id=record.doc_id,
                 filename=record.filename,
-                pages=[record.chunk_index + 1],
+                pages=pages,
                 snippet=snippet,
             )
         )
@@ -232,7 +328,7 @@ async def _retrieve_hits(rag_slug: str, question: str, top_k: int) -> List[tuple
     loop = asyncio.get_running_loop()
 
     def _query() -> List[tuple[float, ChunkRecord]]:
-        return query_index(rag_slug, vector, top_k)
+        return query_index(rag_slug, vector, top_k, min_score=RETRIEVAL_MIN_SCORE)
 
     try:
         return await loop.run_in_executor(None, _query)
@@ -270,6 +366,7 @@ async def _generate_answer(
 ) -> Tuple[str, int]:
     question = request.messages[-1].content if request.messages else ""
     messages = _build_prompt_messages(request, hits)
+    _log_prompt_messages(messages, request.rag_slug)
     # prefer runtime default
     cfg = await get_llm_config()
     temperature = (
@@ -321,12 +418,66 @@ async def handle_chat(request: ChatRequest, user_id: str) -> ChatResponse:
     top_k = request.opts.top_k if request.opts and request.opts.top_k else cfg.top_k_default
     last_message = request.messages[-1]
     hits = await _retrieve_hits(request.rag_slug, last_message.content, top_k)
+    if not hits:
+        raise_http_error(
+            "NO_CONTEXT",
+            "No supporting snippets were retrieved for this query; cannot answer without context.",
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+        )
+    context_hits = list(_truncate_context(hits))
+    corr_id = get_corr_id()
+    retrieval_logger.info(
+        "chat.retrieval",
+        extra={
+            "corr_id": corr_id,
+            "rag_slug": request.rag_slug,
+            "top_k": top_k,
+            "min_score": RETRIEVAL_MIN_SCORE,
+            "hit_count": len(hits),
+            "hits": [
+                {
+                    "score": float(score),
+                    "doc_id": record.doc_id,
+                    "chunk_index": record.chunk_index,
+                    "filename": record.filename,
+                    "page_start": record.page_start,
+                    "page_end": record.page_end,
+                }
+                for score, record in hits[:10]
+            ],
+            "hit_previews": _preview_hits(hits),
+            "question": last_message.content,
+            "context_char_budget": CONTEXT_CHAR_BUDGET,
+        },
+    )
     try:
-        answer, tokens_out = await _generate_answer_with_job(request, hits)
+        retrieval_logger.info(
+            "chat.retrieval.topk corr_id=%s rag=%s %s",
+            corr_id,
+            request.rag_slug,
+            _topk_log_text(hits, limit=top_k),
+        )
+    except Exception:
+        pass
+    try:
+        prompt_logger.info(
+            "chat.prompt.built",
+            extra={
+                "corr_id": corr_id,
+                "rag_slug": request.rag_slug,
+                "question": last_message.content,
+                "top_k": top_k,
+                "context_preview": _format_hits_for_prompt(context_hits)[:1000],
+            },
+        )
+    except Exception:
+        pass
+    try:
+        answer, tokens_out = await _generate_answer_with_job(request, context_hits)
     except LLMUnavailableError:
         raise_http_error(
-            "LLM_NOT_CONFIGURED",
-            "LLM provider is not configured. In Admin → Settings, choose OpenAI or vLLM, provide the API key or base URL, then Save. After changing the embedding model, rebuild indexes for best results.",
+            "LLM_UNAVAILABLE",
+            "LLM provider is unreachable or returned no completion. Verify the provider URL/model and try again.",
             status.HTTP_503_SERVICE_UNAVAILABLE,
         )
     except Exception:
@@ -369,16 +520,97 @@ async def stream_chat(request: ChatRequest, user_id: str) -> AsyncGenerator[str,
     cfg = await get_llm_config()
     top_k = request.opts.top_k if request.opts and request.opts.top_k else cfg.top_k_default
     hits = await _retrieve_hits(request.rag_slug, question, top_k)
+    if not hits:
+        async def _send_error() -> AsyncGenerator[str, None]:
+            payload = {
+                "error": {
+                    "code": "NO_CONTEXT",
+                    "message": "No supporting snippets were retrieved for this query; cannot answer without context.",
+                },
+                "corr_id": corr_id,
+            }
+            yield f"event: error\ndata: {json.dumps(payload)}\n\n"
+            yield f"event: done\ndata: {json.dumps({'usage': {'tokens_in': 0, 'tokens_out': 0}, 'corr_id': corr_id})}\n\n"
+        async for chunk in _send_error():
+            yield chunk
+        return
+    context_hits = list(_truncate_context(hits))
+    logger.info(
+        "chat.retrieval.stream",
+        extra={
+            "corr_id": corr_id,
+            "rag_slug": request.rag_slug,
+            "top_k": top_k,
+            "min_score": RETRIEVAL_MIN_SCORE,
+            "hit_count": len(hits),
+            "hits": [
+                {
+                    "score": float(score),
+                    "doc_id": record.doc_id,
+                    "chunk_index": record.chunk_index,
+                    "filename": record.filename,
+                    "page_start": record.page_start,
+                    "page_end": record.page_end,
+                }
+                for score, record in hits[:10]
+            ],
+            "hit_previews": _preview_hits(hits),
+            "question": question,
+            "context_char_budget": CONTEXT_CHAR_BUDGET,
+        },
+    )
     try:
-        answer, tokens_out = await _generate_answer_with_job(request, hits)
-    except LLMUnavailableError:
-        raise_http_error(
-            "LLM_NOT_CONFIGURED",
-            "LLM provider is not configured. In Admin → Settings, choose OpenAI or vLLM, provide the API key or base URL, then Save. After changing the embedding model, rebuild indexes for best results.",
-            status.HTTP_503_SERVICE_UNAVAILABLE,
+        logger.info(
+            "chat.retrieval.topk corr_id=%s rag=%s %s",
+            corr_id,
+            request.rag_slug,
+            _topk_log_text(hits, limit=top_k),
         )
     except Exception:
-        raise_http_error("CHAT_FAILED", "Unable to generate an answer at this time", status.HTTP_503_SERVICE_UNAVAILABLE)
+        pass
+    try:
+        prompt_logger.info(
+            "chat.prompt.built",
+            extra={
+                "corr_id": corr_id,
+                "rag_slug": request.rag_slug,
+                "question": question,
+                "top_k": top_k,
+                "context_preview": _format_hits_for_prompt(context_hits)[:1000],
+            },
+        )
+    except Exception:
+        pass
+    try:
+        answer, tokens_out = await _generate_answer_with_job(request, context_hits)
+    except LLMUnavailableError:
+        async def _send_error() -> AsyncGenerator[str, None]:
+            payload = {
+                "error": {
+                    "code": "LLM_UNAVAILABLE",
+                    "message": "LLM provider is unreachable or returned no completion. Verify the provider URL/model and try again.",
+                },
+                "corr_id": corr_id,
+            }
+            yield f"event: error\ndata: {json.dumps(payload)}\n\n"
+            yield f"event: done\ndata: {json.dumps({'usage': {'tokens_in': 0, 'tokens_out': 0}, 'corr_id': corr_id})}\n\n"
+        async for chunk in _send_error():
+            yield chunk
+        return
+    except Exception:
+        async def _send_error() -> AsyncGenerator[str, None]:
+            payload = {
+                "error": {
+                    "code": "CHAT_FAILED",
+                    "message": "Unable to generate an answer at this time.",
+                },
+                "corr_id": corr_id,
+            }
+            yield f"event: error\ndata: {json.dumps(payload)}\n\n"
+            yield f"event: done\ndata: {json.dumps({'usage': {'tokens_in': 0, 'tokens_out': 0}, 'corr_id': corr_id})}\n\n"
+        async for chunk in _send_error():
+            yield chunk
+        return
 
     segments = _split_markdown_segments(answer)
     if not segments:

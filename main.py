@@ -6,7 +6,7 @@ FastAPI application entrypoint for the ChatFleet backend (MVP v0.1.1).
 from __future__ import annotations
 
 import logging
-
+import sys
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -19,6 +19,28 @@ from app.services.bootstrap import run_startup
 from app.utils.error_handlers import install_error_handlers
 from app.utils.responses import UTF8JSONResponse
 
+def _configure_logging() -> None:
+    """Ensure an INFO-level console handler exists (uvicorn may preconfigure logging)."""
+    formatter = logging.Formatter("%(asctime)s %(levelname)s %(name)s - %(message)s")
+    root = logging.getLogger()
+    if not root.handlers:
+        handler = logging.StreamHandler(sys.stdout)
+        handler.setFormatter(formatter)
+        root.addHandler(handler)
+    root.setLevel(logging.INFO)
+    for name in [
+        "chatfleet",
+        "chatfleet.backend",
+        "chatfleet.rag.ingest",
+        "chatfleet.vectorstore",
+        "chatfleet.embeddings",
+        "chatfleet.retrieval",
+        "chatfleet.chat",
+    ]:
+        logging.getLogger(name).setLevel(logging.INFO)
+
+
+_configure_logging()
 logger = logging.getLogger("chatfleet.backend")
 
 

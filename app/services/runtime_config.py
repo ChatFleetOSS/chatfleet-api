@@ -84,13 +84,20 @@ async def get_llm_config() -> LLMConfigView:
         return _CACHE[0]
     col = _col()
     doc = await col.find_one({"_id": "runtime"}) or {}
+    provider = doc.get("provider", "openai")
+    default_embed_provider = "local" if provider == "vllm" else "openai"
+    embed_provider = doc.get("embed_provider", default_embed_provider)
+    if provider == "vllm":
+        embed_provider = "local"
+
     cfg = LLMConfigView(
-        provider=doc.get("provider", "openai"),
+        provider=provider,
         base_url=doc.get("base_url"),
         chat_model=doc.get("chat_model", "gpt-4o-mini"),
-        embed_model=doc.get("embed_model", "text-embedding-3-small"),
+        embed_model=doc.get("embed_model", "BAAI/bge-m3"),
+        embed_provider=embed_provider,
         temperature_default=float(doc.get("temperature_default", 0.2)),
-        top_k_default=int(doc.get("top_k_default", 6)),
+        top_k_default=int(doc.get("top_k_default", 12)),
         index_dir=str(doc.get("index_dir", settings.index_dir)),
         upload_dir=str(doc.get("upload_dir", settings.upload_dir)),
         max_upload_mb=int(doc.get("max_upload_mb", settings.max_upload_mb)),
@@ -108,6 +115,10 @@ def _invalidate_cache() -> None:
 
 
 async def set_llm_config(payload: LLMConfigUpdateRequest, actor_id: str) -> LLMConfigView:
+    # Enforce local embeddings when using vLLM to avoid OpenAI dependency mismatches.
+    embed_provider = payload.embed_provider
+    if payload.provider == "vllm":
+        embed_provider = "local"
     col = _col()
     doc: Dict[str, Any] = {
         "_id": "runtime",
@@ -115,8 +126,10 @@ async def set_llm_config(payload: LLMConfigUpdateRequest, actor_id: str) -> LLMC
         "base_url": payload.base_url,
         "chat_model": payload.chat_model,
         "embed_model": payload.embed_model,
+        "embed_provider": embed_provider,
+        "embed_provider": payload.embed_provider,
         "temperature_default": payload.temperature_default if payload.temperature_default is not None else 0.2,
-        "top_k_default": payload.top_k_default if payload.top_k_default is not None else 6,
+        "top_k_default": payload.top_k_default if payload.top_k_default is not None else 12,
         "index_dir": str(payload.index_dir) if payload.index_dir is not None else str(settings.index_dir),
         "upload_dir": str(payload.upload_dir) if payload.upload_dir is not None else str(settings.upload_dir),
         "max_upload_mb": int(payload.max_upload_mb) if payload.max_upload_mb is not None else int(settings.max_upload_mb),

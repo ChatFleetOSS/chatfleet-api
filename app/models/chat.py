@@ -20,7 +20,7 @@ class ChatMessage(BaseModel):
 
 
 class ChatOptions(BaseModel):
-    top_k: Optional[int] = Field(default=6, ge=1)
+    top_k: Optional[int] = Field(default=12, ge=1)
     temperature: Optional[float] = Field(default=0.2, ge=0, le=1)
     max_tokens: Optional[int] = Field(default=500, ge=1)
 

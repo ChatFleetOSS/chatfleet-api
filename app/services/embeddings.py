@@ -12,6 +12,9 @@ import os
 from typing import Iterable, List
 
 import numpy as np
+import logging
+
+os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 
 from app.core.config import settings
 from app.services.runtime_config import get_llm_config, get_api_key
@@ -21,8 +24,17 @@ try:
 except ImportError:  # pragma: no cover - optional dependency
     OpenAI = None  # type: ignore
 
+try:
+    from sentence_transformers import SentenceTransformer
+except ImportError:  # pragma: no cover - optional dependency
+    SentenceTransformer = None  # type: ignore
+
 _openai_client: OpenAI | None = None
+_local_models: dict[str, "SentenceTransformer"] = {}
 EMBED_DIM = 1536
+LOCAL_EMBED_MODEL_DEFAULT = "BAAI/bge-m3"
+logger = logging.getLogger("chatfleet.embeddings")
+logger.setLevel(logging.INFO)
 
 
 def _ensure_client() -> OpenAI | None:
@@ -48,6 +60,29 @@ def _deterministic_embedding(text: str, dim: int = EMBED_DIM) -> List[float]:
         return tiled.tolist()
     return (tiled / norm).tolist()
 
+def _ensure_local_model(model_name: str) -> "SentenceTransformer" | None:
+    if SentenceTransformer is None:
+        return None
+    model = _local_models.get(model_name)
+    if model is not None:
+        return model
+    model = SentenceTransformer(model_name)
+    _local_models[model_name] = model
+    return model
+
+async def _embed_texts_local(texts: list[str], model_name: str) -> List[List[float]]:
+    model = _ensure_local_model(model_name)
+    if model is None:
+        raise RuntimeError("Client not available: install sentence-transformers")
+    loop = asyncio.get_running_loop()
+
+    def _call() -> List[List[float]]:
+        vecs = model.encode(texts, normalize_embeddings=True, convert_to_numpy=True)
+        vecs = vecs.astype("float32")
+        return vecs.tolist()
+
+    return await loop.run_in_executor(None, _call)
+
 
 async def embed_texts(texts: Iterable[str]) -> List[List[float]]:
     """Return embeddings for the given texts, using OpenAI when available."""
@@ -57,19 +92,41 @@ async def embed_texts(texts: Iterable[str]) -> List[List[float]]:
         return []
 
     # prefer runtime configuration when available
+    try:
+        cfg = await get_llm_config()
+        if getattr(cfg, "embed_provider", "openai") == "local":
+            model_name = cfg.embed_model or LOCAL_EMBED_MODEL_DEFAULT
+            logger.info("embeddings.local", extra={"count": len(items), "model": model_name})
+            vectors = await _embed_texts_local(items, model_name)
+            logger.info(
+                "embeddings.local.ok",
+                extra={"count": len(vectors), "dim": len(vectors[0]) if vectors else 0},
+            )
+            return vectors
+    except Exception:
+        cfg = None
+
     client = _ensure_client()
     if client is None:
         try:
-            cfg = await get_llm_config()
+            if cfg is None:
+                cfg = await get_llm_config()
             key = os.getenv("OPENAI_API_KEY") or (await get_api_key())
             # For vLLM, allow missing key by providing a dummy value.
             eff_key = key or ("sk-ignored" if cfg.provider == "vllm" else None)
             if eff_key and OpenAI is not None:
-                client = OpenAI(api_key=eff_key, base_url=cfg.base_url)  # type: ignore[call-arg]
+                base_url = None if cfg.provider == "openai" else cfg.base_url
+                client = OpenAI(api_key=eff_key, base_url=base_url)  # type: ignore[call-arg]
         except Exception:
             client = None
     if client is None:
-        return [_deterministic_embedding(text) for text in items]
+        logger.warning("embeddings.fallback.deterministic", extra={"count": len(items)})
+        vectors = [_deterministic_embedding(text) for text in items]
+        logger.info(
+            "embeddings.fallback.ok",
+            extra={"count": len(vectors), "dim": len(vectors[0]) if vectors else 0},
+        )
+        return vectors
 
     loop = asyncio.get_running_loop()
 
@@ -79,9 +136,20 @@ async def embed_texts(texts: Iterable[str]) -> List[List[float]]:
 
     try:
         cfg = await get_llm_config()
+        if getattr(cfg, "embed_provider", "openai") == "local":
+            model_name = cfg.embed_model or LOCAL_EMBED_MODEL_DEFAULT
+            logger.info("embeddings.local", extra={"count": len(items), "model": model_name})
+            return await _embed_texts_local(items, model_name)
         model_name = cfg.embed_model or settings.embed_model
-        return await loop.run_in_executor(None, lambda: _call(model_name))
+        logger.info("embeddings.remote", extra={"count": len(items), "model": model_name, "provider": cfg.provider})
+        vectors = await loop.run_in_executor(None, lambda: _call(model_name))
+        logger.info(
+            "embeddings.remote.ok",
+            extra={"count": len(vectors), "dim": len(vectors[0]) if vectors else 0, "provider": cfg.provider},
+        )
+        return vectors
     except Exception:
+        logger.exception("embeddings.error", extra={"count": len(items)})
         return [_deterministic_embedding(text) for text in items]
 
 
@@ -101,21 +169,28 @@ async def test_embedding_provider(payload: "LLMConfigTestRequest") -> tuple[bool
     except Exception:
         pass
 
+    embed_provider = payload.embed_provider or ("local" if payload.provider == "vllm" else "openai")
+    if embed_provider == "local":
+        model_name = payload.embed_model or LOCAL_EMBED_MODEL_DEFAULT
+        try:
+            vectors = await _embed_texts_local(["hello world"], model_name)
+            dim = len(vectors[0]) if vectors else None
+            return True, None, dim
+        except Exception as exc:
+            return False, f"PROVIDER_ERROR: {exc}", None
+
     if OpenAI is None:
         return False, "Client not available: install openai package", None
 
     provider = payload.provider
-    base_url = payload.base_url
     key = payload.api_key or os.getenv("OPENAI_API_KEY") or (await get_api_key())
+    base_url = payload.base_url if provider == "openai" else None
 
-    if provider == "openai" and not key:
+    if not key:
         return False, "AUTH_ERROR: missing API key", None
-    if provider == "vllm" and not base_url:
-        return False, "CONFIG_ERROR: missing base_url for vLLM", None
 
-    eff_key = key or ("sk-ignored" if provider == "vllm" else "")
     try:
-        client = OpenAI(api_key=eff_key, base_url=base_url)  # type: ignore[call-arg]
+        client = OpenAI(api_key=key, base_url=base_url)  # type: ignore[call-arg]
         loop = asyncio.get_running_loop()
 
         def _call() -> int:

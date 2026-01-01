@@ -20,6 +20,7 @@ class AdminConfigResponse(BaseModel):
 
 
 LLMProvider = Literal["openai", "vllm"]
+EmbedProvider = Literal["openai", "local"]
 
 
 class LLMConfigView(BaseModel):
@@ -27,6 +28,7 @@ class LLMConfigView(BaseModel):
     base_url: Optional[str] = None
     chat_model: str
     embed_model: str
+    embed_provider: EmbedProvider = Field(default="openai")
     temperature_default: float = 0.2
     top_k_default: int = 6
     index_dir: str
@@ -43,6 +45,7 @@ class LLMConfigUpdateRequest(BaseModel):
     api_key: Optional[str] = None
     chat_model: str
     embed_model: str
+    embed_provider: EmbedProvider = Field(default="openai")
     temperature_default: Optional[float] = None
     top_k_default: Optional[int] = None
     index_dir: Optional[str] = None
@@ -61,6 +64,7 @@ class LLMConfigTestRequest(BaseModel):
     api_key: Optional[str] = None
     chat_model: Optional[str] = None
     embed_model: Optional[str] = None
+    embed_provider: Optional[EmbedProvider] = None
 
 
 class LLMConfigTestResult(BaseModel):

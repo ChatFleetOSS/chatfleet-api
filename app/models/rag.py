@@ -22,7 +22,12 @@ class RagDoc(BaseModel):
     doc_id: UUIDStr
     filename: str
     path: Optional[str] = None
-    mime: Literal["application/pdf"]
+    mime: Literal[
+        "application/pdf",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "text/plain",
+        "application/msword",
+    ]
     size_bytes: int = Field(ge=0)
     sha256: Optional[str] = None
     status: DocStatusEnum

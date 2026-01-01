@@ -16,7 +16,7 @@ from typing import Awaitable, Callable, Dict, Optional
 from uuid import uuid4
 
 from app.core.corr_id import get_corr_id
-from app.models.jobs import JobState, JobStatusResponse, JobType
+from app.models.jobs import JobState, JobStatusResponse, JobType, JobProgressTotals, JobPhase
 
 logger = logging.getLogger(__name__)
 
@@ -30,6 +30,8 @@ class JobRecord:
     finished_at: Optional[datetime] = None
     progress: float = 0.0
     result: Optional[dict] = None
+    phase: Optional[JobPhase] = None
+    totals: Optional[JobProgressTotals] = None
     error: Optional[str] = None
     corr_id: str = field(default_factory=get_corr_id)
 
@@ -58,6 +60,8 @@ class JobManager:
             started_at=record.started_at,
             finished_at=record.finished_at,
             result=record.result,
+            phase=record.phase,
+            totals=record.totals,
             error=record.error,
             corr_id=record.corr_id,
         )

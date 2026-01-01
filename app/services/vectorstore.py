@@ -6,16 +6,20 @@ FAISS-based vector store per RAG slug.
 from __future__ import annotations
 
 import json
+import logging
 import pickle
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import List, Sequence
+from typing import Any, List, Optional, Sequence
 
 import faiss
 import numpy as np
 
 from app.services.runtime_config import get_runtime_overrides_sync
+
+logger = logging.getLogger("chatfleet.vectorstore")
+logger.setLevel(logging.INFO)
 
 DOC_BUCKET = "docs"
 INDEX_FILE = "index.faiss"
@@ -28,6 +32,8 @@ class ChunkRecord:
     filename: str
     chunk_index: int
     text: str
+    page_start: Optional[int] = None
+    page_end: Optional[int] = None
 
 
 def _rag_base_dir(rag_slug: str) -> Path:
@@ -42,7 +48,7 @@ def persist_doc_payload(
     rag_slug: str,
     doc_id: str,
     filename: str,
-    chunks: Sequence[str],
+    chunks: Sequence[Any],
     embeddings: Sequence[Sequence[float]],
 ) -> Path:
     """
@@ -51,10 +57,29 @@ def persist_doc_payload(
 
     base = _rag_base_dir(rag_slug)
     doc_path = base / DOC_BUCKET / f"{doc_id}.pkl"
+    serialized_chunks: list[dict[str, Any]] = []
+    for chunk in chunks:
+        # Accept both legacy strings and structured ChunkWithPage payloads.
+        if isinstance(chunk, dict):
+            text = chunk.get("text", "")
+            page_start = chunk.get("page_start")
+            page_end = chunk.get("page_end")
+        elif hasattr(chunk, "text"):
+            text = getattr(chunk, "text")
+            page_start = getattr(chunk, "page_start", None)
+            page_end = getattr(chunk, "page_end", None)
+        else:
+            text = str(chunk)
+            page_start = None
+            page_end = None
+        serialized_chunks.append(
+            {"text": text, "page_start": page_start, "page_end": page_end}
+        )
+
     payload = {
         "doc_id": doc_id,
         "filename": filename,
-        "chunks": list(chunks),
+        "chunks": serialized_chunks,
         "embeddings": [list(vec) for vec in embeddings],
     }
     with doc_path.open("wb") as handle:
@@ -87,22 +112,48 @@ def build_index(rag_slug: str) -> tuple[int, int]:
     metadata: List[ChunkRecord] = []
 
     dims: set[int] = set()
+
+    def _coerce_chunk(entry: Any) -> tuple[str, Optional[int], Optional[int]]:
+        if isinstance(entry, dict):
+            return (
+                entry.get("text", ""),
+                entry.get("page_start"),
+                entry.get("page_end"),
+            )
+        if hasattr(entry, "text"):
+            return (
+                getattr(entry, "text"),
+                getattr(entry, "page_start", None),
+                getattr(entry, "page_end", None),
+            )
+        return str(entry), None, None
+
     for doc_file in sorted(doc_dir.glob("*.pkl")):
         payload = _load_doc_payload(doc_file)
-        embeddings = payload.get("embeddings", [])
-        chunks = payload.get("chunks", [])
+        embeddings = list(payload.get("embeddings", []))
+        chunks = list(payload.get("chunks", []))
         filename = payload.get("filename", "document")
+        if len(embeddings) != len(chunks):
+            raise ValueError(
+                "EMBED_PAYLOAD_MISMATCH: "
+                f"embeddings={len(embeddings)} chunks={len(chunks)} doc={doc_file.name}"
+            )
         for idx, embedding in enumerate(embeddings):
             arr = np.asarray(embedding, dtype=np.float32)
             vectors.append(arr)
             if arr.ndim == 1:
                 dims.add(int(arr.shape[0]))
+            text, page_start, page_end = _coerce_chunk(
+                chunks[idx] if idx < len(chunks) else {}
+            )
             metadata.append(
                 ChunkRecord(
                     doc_id=payload["doc_id"],
                     filename=filename,
                     chunk_index=idx,
-                    text=chunks[idx] if idx < len(chunks) else "",
+                    text=text,
+                    page_start=page_start,
+                    page_end=page_end,
                 )
             )
 
@@ -118,7 +169,9 @@ def build_index(rag_slug: str) -> tuple[int, int]:
 
     # Enforce homogeneous dimensions across all vectors
     if len(dims) > 1:
-        raise ValueError(f"EMBED_DIM_MISMATCH: multiple embedding dimensions detected: {sorted(dims)}")
+        raise ValueError(
+            f"EMBED_DIM_MISMATCH: multiple embedding dimensions detected: {sorted(dims)}"
+        )
 
     matrix = np.stack(vectors).astype("float32")
     faiss.normalize_L2(matrix)
@@ -128,8 +181,25 @@ def build_index(rag_slug: str) -> tuple[int, int]:
     faiss.write_index(index, str(index_path))
 
     with metadata_path.open("w", encoding="utf-8") as handle:
-        json.dump([record.__dict__ for record in metadata], handle, ensure_ascii=False)
+        json.dump(
+            [record.__dict__ for record in metadata],
+            handle,
+            ensure_ascii=False,
+        )
 
+    logger.info(
+        "rag.index.build rag=%s vectors=%s dim=%s docs=%s",
+        rag_slug,
+        len(metadata),
+        dim,
+        len(list(doc_dir.glob("*.pkl"))),
+        extra={
+            "rag_slug": rag_slug,
+            "vectors": len(metadata),
+            "dim": dim,
+            "docs": len(list(doc_dir.glob("*.pkl"))),
+        },
+    )
     return len(metadata), dim
 
 
@@ -148,6 +218,8 @@ def load_index(rag_slug: str) -> tuple[faiss.IndexFlatIP, List[ChunkRecord]]:
             filename=item["filename"],
             chunk_index=item["chunk_index"],
             text=item.get("text", ""),
+            page_start=item.get("page_start"),
+            page_end=item.get("page_end"),
         )
         for item in entries
     ]
@@ -158,14 +230,38 @@ def query_index(
     rag_slug: str,
     query_vector: Sequence[float],
     top_k: int,
+    min_score: Optional[float] = 0.2,
 ) -> List[tuple[float, ChunkRecord]]:
     index, metadata = load_index(rag_slug)
     vector = np.asarray(query_vector, dtype="float32")[None, :]
     faiss.normalize_L2(vector)
-    distances, indices = index.search(vector, top_k)
+    k = min(max(top_k, 1), index.ntotal)
+    if k == 0:
+        return []
+    distances, indices = index.search(vector, k)
+    raw_scores = distances[0].tolist() if hasattr(distances[0], "tolist") else list(distances[0])
     hits: List[tuple[float, ChunkRecord]] = []
     for score, idx in zip(distances[0], indices[0]):
         if idx < 0 or idx >= len(metadata):
             continue
+        if min_score is not None and score < min_score:
+            continue
         hits.append((float(score), metadata[idx]))
+    logger.info(
+        "rag.index.query rag=%s top_k=%s eff_k=%s min_score=%s returned=%s scores=%s",
+        rag_slug,
+        top_k,
+        k,
+        min_score,
+        len(hits),
+        [float(s) for s in raw_scores[:10]],
+        extra={
+            "rag_slug": rag_slug,
+            "requested_top_k": top_k,
+            "effective_top_k": k,
+            "min_score": min_score,
+            "returned": len(hits),
+            "scores": [float(s) for s in raw_scores[:10]],
+        },
+    )
     return hits

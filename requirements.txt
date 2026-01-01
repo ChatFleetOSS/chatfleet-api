@@ -17,7 +17,10 @@ numpy==2.3.3
 openai==2.3.0
 packaging==25.0
 passlib[bcrypt]==1.7.4
-bcrypt==4.1.2
+bcrypt==4.0.1
+pdfplumber==0.11.4
+python-docx==1.1.2
+chardet==5.2.0
 pydantic==2.12.0
 pydantic_core==2.41.1
 PyPDF2==3.0.1
@@ -32,3 +35,4 @@ typing-inspection==0.4.2
 typing_extensions==4.15.0
 uvicorn==0.37.0
 cryptography==43.0.1
+sentence-transformers==3.0.1

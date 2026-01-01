@@ -9,6 +9,7 @@ available, and falls back to `None` to let callers apply deterministic logic.
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 from typing import Dict, List, Optional, Tuple
 from functools import partial
@@ -23,6 +24,8 @@ from app.models.admin import LLMConfigTestRequest
 from app.services.runtime_config import get_llm_config, get_api_key
 
 _client: OpenAI | None = None
+logger = logging.getLogger(__name__)
+LLM_REQUEST_TIMEOUT = float(os.getenv("LLM_REQUEST_TIMEOUT", "60"))
 
 
 def _ensure_client_env_only() -> OpenAI | None:
@@ -76,6 +79,7 @@ async def generate_chat_completion(
             messages=messages,
             temperature=temperature,
             max_tokens=max_tokens,
+            timeout=LLM_REQUEST_TIMEOUT,
         )
         if not response.choices:
             return "", 0
@@ -91,9 +95,26 @@ async def generate_chat_completion(
 
     try:
         cfg = await get_llm_config()
-        model_name = cfg.chat_model or settings.chat_model
+        model_name = (cfg.chat_model or settings.chat_model).strip()
+        if not model_name:
+            def _pick_model() -> str:
+                models = client.models.list().data
+                if not models:
+                    raise RuntimeError("No models returned by /v1/models")
+                return models[0].id
+            model_name = await loop.run_in_executor(None, _pick_model)
         return await loop.run_in_executor(None, partial(_call, model_name))
-    except Exception:
+    except Exception as exc:
+        try:
+            cfg = await get_llm_config()
+            logger.exception(
+                "LLM chat completion failed (provider=%s base_url=%s model=%s)",
+                cfg.provider,
+                cfg.base_url,
+                cfg.chat_model,
+            )
+        except Exception:
+            logger.exception("LLM chat completion failed")
         return None
 
 
@@ -176,9 +197,9 @@ async def discover_models(provider: str, base_url: Optional[str], api_key: Optio
     Uses the OpenAI-compatible /v1/models when available. For vLLM, base_url is required.
     """
     if OpenAI is None:
-        return [], [], []
+        raise RuntimeError("CLIENT_MISSING: install openai package")
     if provider == "vllm" and not base_url:
-        return [], [], []
+        raise ValueError("CONFIG_ERROR: missing base_url for vLLM")
 
     key = api_key or os.getenv("OPENAI_API_KEY") or (await get_api_key())
     eff_key = key or ("sk-ignored" if provider == "vllm" else "")
@@ -190,8 +211,18 @@ async def discover_models(provider: str, base_url: Optional[str], api_key: Optio
             return [m.id for m in client.models.list().data]
 
         ids = await asyncio.wait_for(loop.run_in_executor(None, _list), timeout=15)
-    except Exception:
-        return [], [], []
+    except Exception as exc:
+        msg = str(exc)
+        if "401" in msg or "Unauthorized" in msg:
+            raise RuntimeError("AUTH_ERROR: unauthorized") from exc
+        if "timed out" in msg or "Timeout" in msg:
+            raise RuntimeError("TIMEOUT: provider did not respond") from exc
+        if "Not Found" in msg or "404" in msg:
+            raise RuntimeError("INVALID_ENDPOINT: check base_url") from exc
+        raise RuntimeError(f"PROVIDER_ERROR: {msg}") from exc
+
+    if not ids:
+        raise RuntimeError("NO_MODELS: provider returned empty list")
 
     raw = list(ids)
     embed_keywords = [

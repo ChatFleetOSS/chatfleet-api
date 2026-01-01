@@ -28,6 +28,7 @@ Chat
 ----
 - `/api/chat` returns structured response with placeholder answer, citations array, usage, corr_id.
 - `/api/chat/stream` tested (SSE events: ready → chunk* → citations → done → ping) with Alice token.
+- Embeddings can run locally via sentence-transformers when `embed_provider=local`.
 
 Jobs
 ----

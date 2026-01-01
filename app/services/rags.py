@@ -6,7 +6,9 @@ RAG persistence, document lifecycle management, and access control helpers.
 from __future__ import annotations
 
 import asyncio
+import logging
 import hashlib
+import chardet
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
@@ -16,6 +18,7 @@ from bson import ObjectId
 from fastapi import UploadFile, status
 from motor.motor_asyncio import AsyncIOMotorCollection
 from PyPDF2 import PdfReader
+from docx import Document as DocxDocument
 from pymongo.errors import DuplicateKeyError
 
 from app.core.config import settings
@@ -31,7 +34,8 @@ from app.models.rag import (
     RagUser,
     RagUsersResponse,
 )
-from app.services.chunker import chunk_text
+from app.models.jobs import JobProgressTotals
+from app.services.chunker import ChunkWithPage, PageText, chunk_pdf
 from app.services.embeddings import embed_texts
 from app.services.jobs import JobRecord, job_manager
 from app.services.logging import write_system_log
@@ -51,6 +55,16 @@ async def ensure_indexes() -> None:
     await col.create_index("slug", unique=True)
     await col.create_index("users")
     await col.create_index("docs.doc_id")
+
+
+ingest_logger = logging.getLogger("chatfleet.rag.ingest")
+ingest_logger.setLevel(logging.INFO)
+
+ALLOWED_EXTENSIONS = {
+    ".pdf": "application/pdf",
+    ".txt": "text/plain",
+    ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+}
 
 
 def _doc_to_summary(doc: Dict[str, Any]) -> RagSummary:
@@ -79,31 +93,133 @@ def _doc_to_rag_doc(entry: Dict[str, Any]) -> RagDoc:
     )
 
 
-async def _extract_pdf_text(path: str) -> str:
-    def _read() -> str:
+async def _extract_pdf_text(path: str) -> List[PageText]:
+    def _normalize(text: str) -> str:
+        import re
+
+        # Normalize newlines, collapse repeated whitespace, keep paragraph breaks.
+        text = text.replace("\r\n", "\n").replace("\r", "\n")
+        text = re.sub(r"-\n(?=[a-z])", "", text)
+        # undo hyphenation across lines
+        text = re.sub(r"[ \t]{2,}", " ", text)
+        text = re.sub(r"\n{3,}", "\n\n", text)
+        return text.strip()
+
+    def _read_pypdf() -> List[PageText]:
         reader = PdfReader(path)
-        contents = []
-        for page in reader.pages:
+        pages: List[PageText] = []
+        for idx, page in enumerate(reader.pages):
             try:
                 snippet = page.extract_text() or ""
             except Exception:
                 snippet = ""
-            contents.append(snippet)
-        return "\n".join(contents)
+            normalized = _normalize(snippet)
+            if normalized:
+                pages.append(PageText(page=idx + 1, text=normalized))
+        return pages
 
-    return await asyncio.to_thread(_read)
+    def _read_pdfplumber() -> List[PageText]:
+        try:
+            import pdfplumber
+        except Exception:
+            return []
+
+        pages: List[PageText] = []
+        with pdfplumber.open(path) as pdf:
+            for idx, page in enumerate(pdf.pages):
+                snippet = page.extract_text(layout=True) or page.extract_text() or ""
+                normalized = _normalize(snippet)
+                if normalized:
+                    pages.append(PageText(page=idx + 1, text=normalized))
+        return pages
+
+    def _read() -> List[PageText]:
+        # Prefer layout-aware extraction; fall back to PyPDF2 if unavailable.
+        pages = _read_pdfplumber()
+        return pages or _read_pypdf()
+
+    pages = await asyncio.to_thread(_read)
+    if not pages:
+        raise ValueError("No extractable text found in PDF")
+    return pages
+
+
+async def _extract_docx_text(path: str) -> List[PageText]:
+    def _read() -> List[PageText]:
+        doc = DocxDocument(path)
+        pages: List[PageText] = []
+        page = 1
+        for para in doc.paragraphs:
+            text = para.text.strip()
+            if text:
+                pages.append(PageText(page=page, text=text))
+                page += 1
+        for table in doc.tables:
+            for row in table.rows:
+                row_text = " | ".join(cell.text.strip() for cell in row.cells if cell.text.strip())
+                if row_text:
+                    pages.append(PageText(page=page, text=row_text))
+                    page += 1
+        return pages
+
+    pages = await asyncio.to_thread(_read)
+    if not pages:
+        raise ValueError("No extractable text found in DOCX")
+    return pages
+
+
+async def _extract_txt_text(path: str) -> List[PageText]:
+    def _read() -> List[PageText]:
+        raw = Path(path).read_bytes()
+        detected = chardet.detect(raw) if raw else {}
+        encoding = (detected.get("encoding") or "utf-8").lower()
+        text = raw.decode(encoding, errors="replace")
+        text = text.replace("\r\n", "\n").replace("\r", "\n").strip()
+        if not text:
+            return []
+        return [PageText(page=1, text=text)]
+
+    pages = await asyncio.to_thread(_read)
+    if not pages:
+        raise ValueError("No extractable text found in text file")
+    return pages
 
 
 async def _persist_chunks_and_vectors(
     rag_slug: str,
     doc_entry: Dict[str, Any],
-    chunks: Sequence[str],
+    chunks: Sequence[ChunkWithPage],
 ) -> int:
     if not chunks:
         raise ValueError("No textual chunks extracted")
-    embeddings = await embed_texts(chunks)
+    embeddings = await embed_texts([chunk.text for chunk in chunks])
+    if len(embeddings) != len(chunks):
+        raise ValueError("Embedding count does not match chunk count")
     # Enforce consistent embedding dimension per RAG
     dim = len(embeddings[0]) if embeddings and embeddings[0] is not None else 0
+    if embeddings:
+        lengths = [len(chunk.text) for chunk in chunks]
+        ingest_logger.info(
+            "rag.ingest.embed rag=%s doc=%s file=%s chunks=%s dim=%s chars[min/avg/max]=[%s/%.1f/%s]",
+            rag_slug,
+            doc_entry["doc_id"],
+            doc_entry["filename"],
+            len(chunks),
+            dim,
+            min(lengths) if lengths else 0,
+            (sum(lengths) / len(lengths)) if lengths else 0.0,
+            max(lengths) if lengths else 0,
+            extra={
+                "rag_slug": rag_slug,
+                "doc_id": doc_entry["doc_id"],
+                "file_name": doc_entry["filename"],
+                "chunks": len(chunks),
+                "dim": dim,
+                "min_chars": min(lengths) if lengths else 0,
+                "max_chars": max(lengths) if lengths else 0,
+                "avg_chars": sum(lengths) / len(lengths) if lengths else 0,
+            },
+        )
     try:
         current_rag = await get_rag_by_slug(rag_slug)
     except Exception:
@@ -266,16 +382,16 @@ def _save_upload_target(rag_slug: str) -> Path:
     return target_dir
 
 
-async def _persist_file(rag_slug: str, upload: UploadFile, doc_id: str) -> Tuple[str, int, str]:
-    """Persist an uploaded PDF to the rag's upload directory safely.
+async def _persist_file(rag_slug: str, upload: UploadFile, doc_id: str, extension: str) -> Tuple[str, int, str]:
+    """Persist an uploaded file safely.
 
-    - Store using a generated filename `<doc_id>.pdf` to avoid path traversal.
-    - Validate basic PDF magic header ("%PDF") before accepting.
+    - Store using a generated filename `<doc_id><extension>` to avoid path traversal.
+    - Validate basic PDF magic header for PDF uploads.
     - Enforce max size during streaming to avoid excessive disk usage.
     """
 
     target_dir = _save_upload_target(rag_slug)
-    safe_filename = f"{doc_id}.pdf"
+    safe_filename = f"{doc_id}{extension}"
     target_path = target_dir / safe_filename
     size = 0
     hasher = hashlib.sha256()
@@ -286,7 +402,7 @@ async def _persist_file(rag_slug: str, upload: UploadFile, doc_id: str) -> Tuple
         await upload.close()
         raise ValueError("Empty upload")
     # Basic PDF signature check
-    if not first_chunk.startswith(b"%PDF"):
+    if extension == ".pdf" and not first_chunk.startswith(b"%PDF"):
         await upload.close()
         raise ValueError("Only PDF files are accepted")
 
@@ -325,6 +441,7 @@ async def _persist_file(rag_slug: str, upload: UploadFile, doc_id: str) -> Tuple
 async def _register_doc_metadata(
     rag: Dict[str, Any],
     filename: str,
+    mime: str,
     stored_path: str,
     size_bytes: int,
     sha256: str,
@@ -334,7 +451,7 @@ async def _register_doc_metadata(
         "doc_id": doc_id,
         "filename": filename,
         "path": stored_path,
-        "mime": "application/pdf",
+        "mime": mime,
         "size_bytes": size_bytes,
         "sha256": sha256,
         "status": "uploaded",
@@ -366,11 +483,13 @@ async def upload_documents(
     new_entries: List[Dict[str, Any]] = []
 
     for upload in uploads:
-        if not (upload.filename or "").lower().endswith(".pdf"):
+        ext = Path(upload.filename or "").suffix.lower()
+        mime = ALLOWED_EXTENSIONS.get(ext)
+        if not mime:
             skipped.append(upload.filename or "unnamed")
             continue
         try:
-            stored_path, size_bytes, sha256 = await _persist_file(rag_slug, upload, str(uuid4()))
+            stored_path, size_bytes, sha256 = await _persist_file(rag_slug, upload, str(uuid4()), ext)
         except ValueError as exc:
             skipped.append(upload.filename or "unnamed")
             await write_system_log(
@@ -384,6 +503,7 @@ async def upload_documents(
         entry = await _register_doc_metadata(
             rag,
             upload.filename or Path(stored_path).name,
+            mime,
             stored_path,
             size_bytes,
             sha256,
@@ -393,6 +513,29 @@ async def upload_documents(
 
     async def runner(job: JobRecord) -> None:
         chunk_counts: Dict[str, int] = {}
+        totals = {
+            "docs_total": len(new_entries),
+            "docs_done": 0,
+            "chunks_total": 0,
+            "chunks_done": 0,
+        }
+
+        def _apply_progress(phase: Optional[str] = None) -> None:
+            job.phase = phase or job.phase
+            job.totals = JobProgressTotals(**totals)
+            job.progress = _compute_progress(totals)
+
+        def _compute_progress(payload: Dict[str, int]) -> float:
+            docs_total = payload.get("docs_total", 0)
+            docs_done = payload.get("docs_done", 0)
+            chunks_total = payload.get("chunks_total", 0)
+            chunks_done = payload.get("chunks_done", 0)
+            if chunks_total > 0:
+                return min(0.98, chunks_done / max(chunks_total, 1))
+            if docs_total > 0:
+                return min(0.98, docs_done / max(docs_total, 1))
+            return 1.0
+
         try:
             if not new_entries:
                 await write_system_log(
@@ -402,30 +545,73 @@ async def upload_documents(
                     details={"job_id": job.job_id, "skipped": skipped},
                     level="warn",
                 )
+                job.progress = 1.0
+                job.phase = "finalizing"
+                job.totals = JobProgressTotals(
+                    docs_total=0, docs_done=0, chunks_total=0, chunks_done=0
+                )
                 job.result = {"total_chunks": 0, "dimension": 0}
                 return
+            _apply_progress("queued")
             for entry in new_entries:
                 doc_id = entry["doc_id"]
                 try:
                     await _update_doc_status(rag_slug, doc_id, "chunking")
-
-                    text = await _extract_pdf_text(entry["path"])
-                    chunks = chunk_text(text)
+                    _apply_progress("chunking")
+                    mime = entry.get("mime", "application/pdf")
+                    if mime == "application/pdf":
+                        pages = await _extract_pdf_text(entry["path"])
+                    elif mime == "application/vnd.openxmlformats-officedocument.wordprocessingml.document":
+                        pages = await _extract_docx_text(entry["path"])
+                    elif mime == "text/plain":
+                        pages = await _extract_txt_text(entry["path"])
+                    elif mime == "application/msword":
+                        raise ValueError("DOC files are not supported; convert to DOCX")
+                    else:
+                        raise ValueError(f"Unsupported mime type: {mime}")
+                    chunks = chunk_pdf(pages)
                     chunk_count = len(chunks)
+                    totals["chunks_total"] += chunk_count
+                    _apply_progress("chunking")
                     chunk_counts[doc_id] = chunk_count
+                    ingest_logger.info(
+                        "rag.ingest.chunk rag=%s doc=%s file=%s pages=%s chunks=%s",
+                        rag_slug,
+                        doc_id,
+                        entry["filename"],
+                        len(pages),
+                        chunk_count,
+                        extra={
+                            "rag_slug": rag_slug,
+                            "doc_id": doc_id,
+                            "file_name": entry["filename"],
+                            "pages": len(pages),
+                            "chunks": chunk_count,
+                            "preview": [
+                                {"page_start": chunk.page_start, "page_end": chunk.page_end, "chars": len(chunk.text)}
+                                for chunk in chunks[:5]
+                            ],
+                        },
+                    )
                     await _update_doc_status(rag_slug, doc_id, "chunked", chunk_count=chunk_count)
-
+                    _apply_progress("embedding")
                     stored_count = await _persist_chunks_and_vectors(rag_slug, entry, chunks)
+                    totals["chunks_done"] += stored_count
+                    totals["docs_done"] += 1
                     await _update_doc_status(rag_slug, doc_id, "indexing", chunk_count=stored_count)
+                    _apply_progress("indexing")
                 except Exception as doc_exc:
                     await _update_doc_status(rag_slug, doc_id, "error", error=str(doc_exc))
                     raise
 
+            job.phase = "indexing"
             total_chunks, dimension = await asyncio.to_thread(rebuild_vector_index, rag_slug)
             for entry in new_entries:
                 doc_id = entry["doc_id"]
                 await _update_doc_status(rag_slug, doc_id, "indexed", chunk_count=chunk_counts.get(doc_id, 0))
-
+            totals["chunks_total"] = max(totals["chunks_total"], total_chunks)
+            totals["chunks_done"] = max(totals["chunks_done"], total_chunks)
+            _apply_progress("finalizing")
             await _update_rag_index_summary(rag_slug, total_chunks, dimension)
             await write_system_log(
                 event="rag.upload.complete",
@@ -546,7 +732,14 @@ async def reset_index(rag_slug: str, user_id: str) -> str:
                 "$set": {
                     "docs": [],
                     "chunks": 0,
-                    "index": {"type": "faiss", "path": "", "emb_model": settings.embed_model, "dim": 1536, "built_at": None},
+                    "index": {
+                        "type": "faiss",
+                        "path": "",
+                        "emb_model": (await get_llm_config()).embed_model,
+                        "dim": 0,
+                        "built_at": None,
+                    },
+                    "embed_dim": 0,
                     "last_updated": datetime.now(timezone.utc),
                 }
             },

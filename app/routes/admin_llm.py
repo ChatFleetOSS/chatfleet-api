@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException, status
 
 from app.dependencies.auth import require_admin
 from app.models.admin import (
@@ -61,7 +61,14 @@ async def put_config(payload: LLMConfigUpdateRequest, current_user = Depends(req
 
 @router.post("/config/models", response_model=LLMModelsResponse)
 async def post_models(payload: LLMModelsRequest, current_user = Depends(require_admin)) -> LLMModelsResponse:
-    chat, emb, raw = await discover_models(payload.provider, payload.base_url, payload.api_key)
+    try:
+        chat, emb, raw = await discover_models(payload.provider, payload.base_url, payload.api_key)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    except TimeoutError as exc:
+        raise HTTPException(status_code=status.HTTP_504_GATEWAY_TIMEOUT, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
     return LLMModelsResponse(**with_corr_id({
         "chat_models": chat,
         "embed_models": emb,
