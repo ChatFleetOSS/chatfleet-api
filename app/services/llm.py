@@ -23,23 +23,24 @@ from app.core.config import settings
 from app.models.admin import LLMConfigTestRequest
 from app.services.runtime_config import get_llm_config, get_api_key
 
-_client: OpenAI | None = None
+_client_cache: dict[tuple[str | None, str | None], OpenAI] = {}
 logger = logging.getLogger(__name__)
 LLM_REQUEST_TIMEOUT = float(os.getenv("LLM_REQUEST_TIMEOUT", "60"))
 
 
-def _ensure_client_env_only() -> OpenAI | None:
-    global _client
-    if _client is not None:
-        return _client
-    # prefer runtime config key
-    api_key = os.getenv("OPENAI_API_KEY")
-    base_url: str | None = None
-    # do not attempt async operations here; environment-only client
-    if not api_key or OpenAI is None:
+def _get_chat_client(provider: str, base_url: str | None, key: str | None) -> OpenAI | None:
+    if OpenAI is None:
         return None
-    _client = OpenAI(api_key=api_key)
-    return _client
+    eff_key = key or ("sk-ignored" if provider == "vllm" else None)
+    if not eff_key:
+        return None
+    cache_key = (base_url, eff_key)
+    cached = _client_cache.get(cache_key)
+    if cached is not None:
+        return cached
+    client = OpenAI(api_key=eff_key, base_url=base_url)  # type: ignore[call-arg]
+    _client_cache[cache_key] = client
+    return client
 
 
 async def generate_chat_completion(
@@ -57,17 +58,21 @@ async def generate_chat_completion(
 
     # prefer runtime configuration when available
     try:
-        from app.services.runtime_config import get_llm_config, get_api_key as _get_key
         cfg = await get_llm_config()
-        key = os.getenv("OPENAI_API_KEY") or (await _get_key())
-        # For vLLM, an API key may be optional but OpenAI client requires a non-empty string.
-        eff_key = key or ("sk-ignored" if cfg.provider == "vllm" else None)
-        if eff_key and OpenAI is not None:
-            client = OpenAI(api_key=eff_key, base_url=cfg.base_url)  # type: ignore[call-arg]
-        else:
-            client = _ensure_client_env_only()
     except Exception:
-        client = _ensure_client_env_only()
+        cfg = None
+    if cfg is None:
+        return None
+
+    key = os.getenv("OPENAI_API_KEY")
+    try:
+        key = key or (await get_api_key())
+    except Exception:
+        pass
+    if cfg.provider == "vllm" and not cfg.base_url:
+        return None
+    base_url = None if cfg.provider == "openai" else cfg.base_url
+    client = _get_chat_client(cfg.provider, base_url, key)
     if client is None:
         return None
 

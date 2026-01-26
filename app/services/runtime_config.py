@@ -127,7 +127,6 @@ async def set_llm_config(payload: LLMConfigUpdateRequest, actor_id: str) -> LLMC
         "chat_model": payload.chat_model,
         "embed_model": payload.embed_model,
         "embed_provider": embed_provider,
-        "embed_provider": payload.embed_provider,
         "temperature_default": payload.temperature_default if payload.temperature_default is not None else 0.2,
         "top_k_default": payload.top_k_default if payload.top_k_default is not None else 12,
         "index_dir": str(payload.index_dir) if payload.index_dir is not None else str(settings.index_dir),
