@@ -29,23 +29,28 @@ try:
 except ImportError:  # pragma: no cover - optional dependency
     SentenceTransformer = None  # type: ignore
 
-_openai_client: OpenAI | None = None
+_client_cache: dict[tuple[str | None, str | None], OpenAI] = {}
 _local_models: dict[str, "SentenceTransformer"] = {}
 EMBED_DIM = 1536
 LOCAL_EMBED_MODEL_DEFAULT = "BAAI/bge-m3"
+LOCAL_EMBED_MODEL_DEFAULT_DIM = 1024
 logger = logging.getLogger("chatfleet.embeddings")
 logger.setLevel(logging.INFO)
 
 
-def _ensure_client() -> OpenAI | None:
-    global _openai_client
-    if _openai_client is not None:
-        return _openai_client
-    api_key = os.getenv("OPENAI_API_KEY")
-    if not api_key or OpenAI is None:
+def _get_embed_client(provider: str, base_url: str | None, key: str | None) -> OpenAI | None:
+    if OpenAI is None:
         return None
-    _openai_client = OpenAI(api_key=api_key)
-    return _openai_client
+    eff_key = key or ("sk-ignored" if provider == "vllm" else None)
+    if not eff_key:
+        return None
+    cache_key = (base_url, eff_key)
+    cached = _client_cache.get(cache_key)
+    if cached is not None:
+        return cached
+    client = OpenAI(api_key=eff_key, base_url=base_url)  # type: ignore[call-arg]
+    _client_cache[cache_key] = client
+    return client
 
 
 def _deterministic_embedding(text: str, dim: int = EMBED_DIM) -> List[float]:
@@ -84,6 +89,21 @@ async def _embed_texts_local(texts: list[str], model_name: str) -> List[List[flo
     return await loop.run_in_executor(None, _call)
 
 
+def _fallback_dim(cfg) -> int:
+    """Best-effort guess for embedding dimension to avoid mixed dims on fallback."""
+    try:
+        if cfg and getattr(cfg, "embed_provider", "openai") == "local":
+            model_name = getattr(cfg, "embed_model", None) or LOCAL_EMBED_MODEL_DEFAULT
+            model = _local_models.get(model_name)
+            if model and hasattr(model, "get_sentence_embedding_dimension"):
+                return int(model.get_sentence_embedding_dimension())  # type: ignore[call-arg]
+            if model_name == LOCAL_EMBED_MODEL_DEFAULT:
+                return LOCAL_EMBED_MODEL_DEFAULT_DIM
+    except Exception:
+        pass
+    return EMBED_DIM
+
+
 async def embed_texts(texts: Iterable[str]) -> List[List[float]]:
     """Return embeddings for the given texts, using OpenAI when available."""
 
@@ -92,6 +112,7 @@ async def embed_texts(texts: Iterable[str]) -> List[List[float]]:
         return []
 
     # prefer runtime configuration when available
+    cfg = None
     try:
         cfg = await get_llm_config()
         if getattr(cfg, "embed_provider", "openai") == "local":
@@ -106,22 +127,19 @@ async def embed_texts(texts: Iterable[str]) -> List[List[float]]:
     except Exception:
         cfg = None
 
-    client = _ensure_client()
-    if client is None:
+    key = os.getenv("OPENAI_API_KEY")
+    if cfg is not None:
         try:
-            if cfg is None:
-                cfg = await get_llm_config()
-            key = os.getenv("OPENAI_API_KEY") or (await get_api_key())
-            # For vLLM, allow missing key by providing a dummy value.
-            eff_key = key or ("sk-ignored" if cfg.provider == "vllm" else None)
-            if eff_key and OpenAI is not None:
-                base_url = None if cfg.provider == "openai" else cfg.base_url
-                client = OpenAI(api_key=eff_key, base_url=base_url)  # type: ignore[call-arg]
+            key = key or (await get_api_key())
         except Exception:
-            client = None
+            pass
+    provider = getattr(cfg, "provider", "openai")
+    base_url = None if provider == "openai" else getattr(cfg, "base_url", None)
+    client = _get_embed_client(provider, base_url, key)
     if client is None:
-        logger.warning("embeddings.fallback.deterministic", extra={"count": len(items)})
-        vectors = [_deterministic_embedding(text) for text in items]
+        dim = _fallback_dim(cfg)
+        logger.warning("embeddings.fallback.deterministic", extra={"count": len(items), "dim": dim})
+        vectors = [_deterministic_embedding(text, dim=dim) for text in items]
         logger.info(
             "embeddings.fallback.ok",
             extra={"count": len(vectors), "dim": len(vectors[0]) if vectors else 0},
@@ -135,7 +153,7 @@ async def embed_texts(texts: Iterable[str]) -> List[List[float]]:
         return [row.embedding for row in response.data]
 
     try:
-        cfg = await get_llm_config()
+        cfg = cfg or await get_llm_config()
         if getattr(cfg, "embed_provider", "openai") == "local":
             model_name = cfg.embed_model or LOCAL_EMBED_MODEL_DEFAULT
             logger.info("embeddings.local", extra={"count": len(items), "model": model_name})
