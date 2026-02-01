@@ -462,13 +462,6 @@ async def handle_chat(request: ChatRequest, user_id: str) -> ChatResponse:
             "No supporting snippets were retrieved for this query; cannot answer without context.",
             status.HTTP_503_SERVICE_UNAVAILABLE,
         )
-    if not _has_query_overlap(question, hits):
-        usage = Usage(
-            tokens_in=sum(len(msg.content) for msg in request.messages),
-            tokens_out=0,
-        )
-        corr_id = get_corr_id()
-        return ChatResponse(answer=FALLBACK_ANSWER, citations=[], usage=usage, corr_id=corr_id)
     context_hits = list(_truncate_context(hits))
     corr_id = get_corr_id()
     retrieval_logger.info(
@@ -578,24 +571,6 @@ async def stream_chat(request: ChatRequest, user_id: str) -> AsyncGenerator[str,
             yield f"event: done\ndata: {json.dumps({'usage': {'tokens_in': 0, 'tokens_out': 0}, 'corr_id': corr_id})}\n\n"
         async for chunk in _send_error():
             yield chunk
-        return
-    if not _has_query_overlap(question, hits):
-        async def _send_fallback() -> AsyncGenerator[str, None]:
-            usage = {"tokens_in": sum(len(msg.content) for msg in request.messages), "tokens_out": 0}
-            payload_ready = {"corr_id": corr_id}
-            yield f"event: ready\ndata: {json.dumps(payload_ready)}\n\n"
-            yield f"event: chunk\ndata: {json.dumps({'delta': FALLBACK_ANSWER, 'corr_id': corr_id})}\n\n"
-            yield f"event: citations\ndata: {json.dumps({'citations': [], 'corr_id': corr_id})}\n\n"
-            yield f"event: done\ndata: {json.dumps({'usage': usage, 'corr_id': corr_id})}\n\n"
-            yield f"event: ping\ndata: {json.dumps({'corr_id': corr_id})}\n\n"
-        async for chunk in _send_fallback():
-            yield chunk
-        await write_system_log(
-            event="chat.stream",
-            rag_slug=request.rag_slug,
-            user_id=user_id,
-            details={"corr_id": corr_id, "chunks": 1, "fallback": True},
-        )
         return
     context_hits = list(_truncate_context(hits))
     logger.info(
