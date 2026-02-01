@@ -9,6 +9,9 @@ import asyncio
 import logging
 import hashlib
 import chardet
+import json
+import random
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
@@ -45,8 +48,9 @@ from app.services.jobs import JobRecord, job_manager
 from app.services.logging import write_system_log
 from app.services.users import find_user_by_id, update_user_rags
 from app.services.vectorstore import build_index as rebuild_vector_index
-from app.services.vectorstore import persist_doc_payload, remove_doc_payload
+from app.services.vectorstore import persist_doc_payload, remove_doc_payload, load_index, ChunkRecord
 from app.services.runtime_config import get_runtime_overrides_sync, get_llm_config
+from app.services.llm import generate_chat_completion
 from app.utils.responses import raise_http_error, with_corr_id
 
 
@@ -80,6 +84,7 @@ def _doc_to_summary(doc: Dict[str, Any]) -> RagSummary:
         chunks=doc.get("chunks", 0),
         last_updated=doc.get("last_updated", datetime.now(timezone.utc)),
         visibility=doc.get("visibility", "private"),
+        suggestions=doc.get("suggestions", []) or [],
     )
 
 
@@ -300,6 +305,120 @@ async def _update_rag_index_summary(rag_slug: str, total_chunks: int, dimension:
     )
 
 
+def _select_chunk_samples(records: List[ChunkRecord], limit: int = 32, max_chars: int = 320) -> List[str]:
+    if not records:
+        return []
+    step = max(1, len(records) // max(1, min(limit, len(records))))
+    sampled = records[::step][:limit]
+    seen: set[str] = set()
+    snippets: List[str] = []
+    for rec in sampled:
+        text = (rec.text or "").strip()
+        if not text:
+            continue
+        snippet = text[:max_chars].strip()
+        normalized = snippet.lower()
+        if normalized and normalized not in seen:
+            seen.add(normalized)
+            snippets.append(snippet)
+    return snippets
+
+
+async def _load_chunk_samples_for_suggestions(rag_slug: str, limit: int = 32, max_chars: int = 320) -> List[str]:
+    try:
+        _, records = load_index(rag_slug)
+    except FileNotFoundError:
+        return []
+    except Exception as exc:
+        ingest_logger.warning(
+            "rag.suggestions.sample_failed rag=%s error=%s", rag_slug, exc, extra={"rag_slug": rag_slug}
+        )
+        return []
+    return _select_chunk_samples(records, limit=limit, max_chars=max_chars)
+
+
+def _parse_suggestions(raw: str, limit: int = 4, max_len: int = 120) -> List[str]:
+    raw = (raw or "").strip()
+    if not raw:
+        return []
+
+    def _clean(item: str) -> str:
+        item = re.sub(r"^\s*[-*\d\.\)]\s*", "", item.strip())
+        item = item.strip().strip('"').strip("'")
+        return item[:max_len].strip()
+
+    suggestions: List[str] = []
+    try:
+        parsed = json.loads(raw)
+        if isinstance(parsed, list):
+            for entry in parsed:
+                if isinstance(entry, str):
+                    cleaned = _clean(entry)
+                    if cleaned:
+                        suggestions.append(cleaned)
+    except Exception:
+        pass
+
+    if not suggestions:
+        for line in raw.splitlines():
+            cleaned = _clean(line)
+            if cleaned:
+                suggestions.append(cleaned)
+
+    deduped: List[str] = []
+    seen: set[str] = set()
+    for entry in suggestions:
+        key = entry.lower()
+        if key and key not in seen:
+            seen.add(key)
+            deduped.append(entry)
+        if len(deduped) >= limit:
+            break
+    return deduped
+
+
+async def _generate_rag_suggestions(rag_slug: str, name: str, description: str) -> tuple[List[str], Optional[str]]:
+    snippets = await _load_chunk_samples_for_suggestions(rag_slug, limit=32, max_chars=320)
+    payload_summary = f"Assistant name: {name or rag_slug}\nDescription: {description or 'N/A'}"
+    snippet_block = "\n".join(f"- {s}" for s in snippets[:32])
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "You generate 3-4 concise end-user questions for a documentation assistant. "
+                "Use the provided snippets to stay on-topic. Keep each question under 120 characters. "
+                "Respond ONLY with a JSON array of strings, no markdown, no numbering."
+            ),
+        },
+        {
+            "role": "user",
+            "content": f"{payload_summary}\n\nSnippets:\n{snippet_block}",
+        },
+    ]
+    llm_result = await generate_chat_completion(messages, temperature=0.3, max_tokens=320)
+    if llm_result is None:
+        return [], "llm_unavailable"
+    raw, _ = llm_result
+    suggestions = _parse_suggestions(raw)
+    if not suggestions:
+        return [], "empty_suggestions"
+    return suggestions, None
+
+
+async def _persist_rag_suggestions(rag_slug: str, suggestions: List[str]) -> None:
+    col = get_collection()
+    await col.update_one(
+        {"slug": rag_slug},
+        {
+            "$set": {
+                "suggestions": suggestions,
+                "suggestions_updated_at": datetime.now(timezone.utc),
+                "last_updated": datetime.now(timezone.utc),
+            }
+        },
+    )
+
+
 async def list_rags_for_slugs(slugs: List[str], limit: int = 50, cursor: Optional[str] = None, include_public: bool = False) -> Tuple[List[RagSummary], Optional[str]]:
     col = get_collection()
     ors: List[Dict[str, Any]] = []
@@ -368,6 +487,7 @@ async def create_rag(payload: RagCreateRequest, creator_id: str) -> RagSummary:
         "docs": [],
         "chunks": 0,
         "visibility": payload.visibility or "private",
+        "suggestions": [],
         "index": {
             "type": "faiss",
             "path": "",
@@ -608,7 +728,8 @@ async def upload_documents(
                 job.totals = JobProgressTotals(
                     docs_total=0, docs_done=0, chunks_total=0, chunks_done=0
                 )
-                job.result = {"total_chunks": 0, "dimension": 0}
+                job.suggestions_ready = True
+                job.result = {"total_chunks": 0, "dimension": 0, "suggestions": 0}
                 return
             _apply_progress("queued")
             for entry in new_entries:
@@ -673,13 +794,46 @@ async def upload_documents(
             totals["chunks_done"] = max(totals["chunks_done"], total_chunks)
             _apply_progress("finalizing")
             await _update_rag_index_summary(rag_slug, total_chunks, dimension)
+
+            job.phase = "suggestions"
+            suggestions: List[str] = []
+            suggestions_error: Optional[str] = None
+            try:
+                suggestions, suggestions_error = await _generate_rag_suggestions(
+                    rag_slug,
+                    rag.get("name", rag_slug),
+                    rag.get("description", ""),
+                )
+                await _persist_rag_suggestions(rag_slug, suggestions)
+            except Exception as exc:
+                suggestions_error = str(exc)
+                ingest_logger.warning(
+                    "rag.suggestions.generate_failed rag=%s error=%s", rag_slug, exc, extra={"rag_slug": rag_slug}
+                )
+                await _persist_rag_suggestions(rag_slug, suggestions)
+            finally:
+                job.suggestions_ready = True
+                job.result = {
+                    "total_chunks": total_chunks,
+                    "dimension": dimension,
+                    "suggestions": len(suggestions),
+                }
+                if suggestions_error:
+                    job.result["suggestions_error"] = suggestions_error
+            job.progress = 1.0
             await write_system_log(
                 event="rag.upload.complete",
                 rag_slug=rag_slug,
                 user_id=uploader_id,
-                details={"accepted": accepted, "skipped": skipped, "job_id": job.job_id, "chunks": total_chunks},
+                details={
+                    "accepted": accepted,
+                    "skipped": skipped,
+                    "job_id": job.job_id,
+                    "chunks": total_chunks,
+                    "suggestions": len(suggestions),
+                    "suggestions_error": suggestions_error,
+                },
             )
-            job.result = {"total_chunks": total_chunks, "dimension": dimension}
         except Exception as exc:  # pragma: no cover — safety net
             job.status = "error"
             job.error = str(exc)

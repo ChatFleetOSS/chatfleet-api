@@ -14,7 +14,7 @@ from .common import UUIDStr
 
 JobType = Literal["RAG_INDEX", "RAG_REBUILD", "RAG_RESET", "CHAT_COMPLETION"]
 JobState = Literal["queued", "running", "done", "error"]
-JobPhase = Literal["queued", "chunking", "embedding", "indexing", "finalizing"]
+JobPhase = Literal["queued", "chunking", "embedding", "indexing", "suggestions", "finalizing"]
 
 
 class JobProgressTotals(BaseModel):
@@ -39,5 +39,6 @@ class JobStatusResponse(BaseModel):
     result: Optional[dict[str, Any]] = None
     phase: Optional[JobPhase] = None
     totals: Optional[JobProgressTotals] = None
+    suggestions_ready: bool = False
     error: Optional[str] = None
     corr_id: str

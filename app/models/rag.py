@@ -47,6 +47,7 @@ class RagSummary(BaseModel):
     chunks: int = Field(ge=0)
     last_updated: datetime
     visibility: VisibilityEnum = Field(default="private")
+    suggestions: List[str] = Field(default_factory=list)
 
 
 class RagListResponse(BaseModel):

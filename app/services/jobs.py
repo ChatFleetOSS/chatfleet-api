@@ -33,6 +33,7 @@ class JobRecord:
     phase: Optional[JobPhase] = None
     totals: Optional[JobProgressTotals] = None
     error: Optional[str] = None
+    suggestions_ready: bool = False
     corr_id: str = field(default_factory=get_corr_id)
 
 
@@ -62,6 +63,7 @@ class JobManager:
             result=record.result,
             phase=record.phase,
             totals=record.totals,
+            suggestions_ready=record.suggestions_ready,
             error=record.error,
             corr_id=record.corr_id,
         )
