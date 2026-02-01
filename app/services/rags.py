@@ -79,6 +79,7 @@ def _doc_to_summary(doc: Dict[str, Any]) -> RagSummary:
         description=doc.get("description", ""),
         chunks=doc.get("chunks", 0),
         last_updated=doc.get("last_updated", datetime.now(timezone.utc)),
+        visibility=doc.get("visibility", "private"),
     )
 
 
@@ -299,11 +300,16 @@ async def _update_rag_index_summary(rag_slug: str, total_chunks: int, dimension:
     )
 
 
-async def list_rags_for_slugs(slugs: List[str], limit: int = 50, cursor: Optional[str] = None) -> Tuple[List[RagSummary], Optional[str]]:
-    if not slugs:
-        return [], None
+async def list_rags_for_slugs(slugs: List[str], limit: int = 50, cursor: Optional[str] = None, include_public: bool = False) -> Tuple[List[RagSummary], Optional[str]]:
     col = get_collection()
-    query: Dict[str, Any] = {"slug": {"$in": slugs}}
+    ors: List[Dict[str, Any]] = []
+    if slugs:
+        ors.append({"slug": {"$in": slugs}})
+    if include_public:
+        ors.append({"visibility": "public"})
+    if not ors:
+        return [], None
+    query: Dict[str, Any] = {"$or": ors}
     if cursor:
         query["_id"] = {"$gt": ObjectId(cursor)}
     docs: List[Dict[str, Any]] = []
@@ -331,6 +337,21 @@ async def list_all_rags(limit: int = 50, cursor: Optional[str] = None) -> Tuple[
     return [_doc_to_summary(doc) for doc in docs], next_cursor
 
 
+async def list_public_rags(limit: int = 50, cursor: Optional[str] = None) -> Tuple[List[RagSummary], Optional[str]]:
+    col = get_collection()
+    query: Dict[str, Any] = {"visibility": "public"}
+    if cursor:
+        query["_id"] = {"$gt": ObjectId(cursor)}
+    docs: List[Dict[str, Any]] = []
+    async for doc in col.find(query).sort("_id", 1).limit(limit + 1):
+        docs.append(doc)
+    next_cursor = None
+    if len(docs) > limit:
+        next_cursor = str(docs[-1]["_id"])
+        docs = docs[:-1]
+    return [_doc_to_summary(doc) for doc in docs], next_cursor
+
+
 async def get_rag_by_slug(slug: str) -> Optional[Dict[str, Any]]:
     col = get_collection()
     return await col.find_one({"slug": slug})
@@ -346,6 +367,7 @@ async def create_rag(payload: RagCreateRequest, creator_id: str) -> RagSummary:
         "users": [],
         "docs": [],
         "chunks": 0,
+        "visibility": payload.visibility or "private",
         "index": {
             "type": "faiss",
             "path": "",

@@ -23,10 +23,14 @@ async def write_system_log(
     details: Optional[dict[str, Any]] = None,
     level: SystemLogLevel = "info",
 ) -> None:
+    try:
+        user_obj_id = ObjectId(user_id) if user_id else None
+    except Exception:
+        user_obj_id = None
     doc: dict[str, Any] = {
         "event": event,
         "rag_slug": rag_slug,
-        "user_id": ObjectId(user_id) if user_id else None,
+        "user_id": user_obj_id,
         "details": details or {},
         "level": level,
         "corr_id": get_corr_id(),

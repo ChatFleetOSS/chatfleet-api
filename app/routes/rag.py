@@ -26,7 +26,12 @@ async def rag_list(
     if current_user.get("role") == "admin":
         items, next_cursor = await list_all_rags(limit=limit, cursor=cursor)
     else:
-        items, next_cursor = await list_rags_for_slugs(current_user.get("rags", []), limit=limit, cursor=cursor)
+        items, next_cursor = await list_rags_for_slugs(
+            current_user.get("rags", []),
+            limit=limit,
+            cursor=cursor,
+            include_public=True,
+        )
     payload = {"items": items, "next_cursor": next_cursor}
     return RagListResponse(**with_corr_id(payload))
 

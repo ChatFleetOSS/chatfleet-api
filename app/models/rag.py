@@ -14,6 +14,7 @@ from .common import ObjectIdStr, RagSlug, UUIDStr
 
 DocStatusEnum = Literal["uploaded", "chunking", "chunked", "indexing", "indexed", "error"]
 IndexStatusEnum = Literal["idle", "building", "error"]
+VisibilityEnum = Literal["private", "public"]
 
 
 class RagDoc(BaseModel):
@@ -45,6 +46,7 @@ class RagSummary(BaseModel):
     description: str
     chunks: int = Field(ge=0)
     last_updated: datetime
+    visibility: VisibilityEnum = Field(default="private")
 
 
 class RagListResponse(BaseModel):
@@ -83,6 +85,7 @@ class RagCreateRequest(BaseModel):
     slug: RagSlug
     name: str = Field(min_length=1, max_length=120)
     description: str = Field(default="", max_length=500)
+    visibility: VisibilityEnum = Field(default="private")
 
 
 class RagCreateResponse(BaseModel):

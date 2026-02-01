@@ -45,6 +45,11 @@ class RagResetRequest(BaseModel):
     confirm: bool
 
 
+class RagVisibilityUpdate(BaseModel):
+    rag_slug: str
+    visibility: Literal["private", "public"]
+
+
 @router.post("/rag", response_model=RagCreateResponse, status_code=status.HTTP_201_CREATED)
 async def rag_create(
     payload: RagCreateRequest,

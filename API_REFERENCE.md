@@ -65,28 +65,36 @@ Notes:
 
 ## RAG Directory
 ### `GET /api/rag/list`
-- **Access:** Any authenticated user. Non-admins only see slugs included in their JWT `rags` claim.
+- **Access:** Any authenticated user. Non-admins see their shared slugs **plus** public RAGs.
 - **Query:** `limit`, `cursor` (optional).
 - **Response 200:** 
   ```json
-  {"items": [{"slug": "hr-docs", "name": "HR Docs", "description": "...", "chunks": 1200, "last_updated": "..."}], "next_cursor": null, "corr_id": "..."}
+  {"items": [{"slug": "hr-docs", "name": "HR Docs", "description": "...", "chunks": 1200, "last_updated": "...", "visibility": "private"}], "next_cursor": null, "corr_id": "..."}
   ```
 
 ### `GET /api/admin/rag/list`
 - **Access:** Admin.
 - **Purpose:** Same response as `/rag/list` but unfiltered.
 
+### `GET /api/public/rag/list`
+- **Access:** Public (no auth).
+- **Response:** Same shape as `/api/rag/list` but only includes `visibility="public"` entries.
+
+### `GET /api/public/rag/docs?rag_slug=<slug>`
+- **Access:** Public if the RAG is marked `public`.
+- **Response:** Document metadata for the public RAG (no user info).
+
 ## RAG Lifecycle (Admin)
 ### `POST /api/rag`
 - **Access:** Admin.
 - **Body:**
   ```json
-  {"slug": "new-rag", "name": "New Knowledge Base", "description": "Short summary"}
+  {"slug": "new-rag", "name": "New Knowledge Base", "description": "Short summary", "visibility": "private"}
   ```
 - **Response 201:**
   ```json
   {
-    "rag": {"slug": "new-rag", "name": "New Knowledge Base", "description": "Short summary", "chunks": 0, "last_updated": "..."},
+    "rag": {"slug": "new-rag", "name": "New Knowledge Base", "description": "Short summary", "chunks": 0, "last_updated": "...", "visibility": "private"},
     "corr_id": "..."
   }
   ```
@@ -180,6 +188,14 @@ Notes:
 - Frontend must treat payload lines as JSON and stop reading after `done`.
 - Each `chunk.delta` string contains raw Markdown fragments (including trailing newlines); append them in order before parsing/rendering on the frontend. The backend never inlines sources—use the `citations` payload to add a dedicated “Sources” section client-side.
 - Internally the backend waits for the background LLM job to complete, then streams the composed answer in 240‑character chunks so the UI can display incremental progress.
+
+### `POST /api/public/chat`
+- **Access:** Public (no auth) but only for RAGs with `visibility="public"`.
+- **Body/Response:** Same contract as `/api/chat`.
+
+### `POST /api/public/chat/stream`
+- **Access:** Public (no auth) for public RAGs.
+- **Behavior:** Same event contract as `/api/chat/stream`.
 
 ## Jobs
 ### `GET /api/jobs/{job_id}`
