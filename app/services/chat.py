@@ -277,10 +277,10 @@ def _build_prompt_messages(request: ChatRequest, hits: Sequence[tuple[float, Chu
         {
             "role": "system",
             "content": (
-                "You are a helpful and warm assistant. Based on the given context, structure a helpful answer that aggregates the information in the context to give the user as much information as possible. "
-                "Don't use external or prior knowledge. "
-                "Tell the user what you found and how this can be helpful for them. "
-                "Respond in the user's language using GitHub-flavored Markdown."
+                "You are a helpful and warm assistant. Use ONLY the provided context. "
+                "Structure a helpful answer that aggregates all relevant information in the context about the user's query. "
+                "Do not add external or prior knowledge. If the context is thin, give a short, cautious answer and note that more detail is not available in the excerpts. "
+                "Tell the user what you found and how it may help them. Respond in the user's language using GitHub-flavored Markdown."
             ),
         },
         {
