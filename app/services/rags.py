@@ -324,6 +324,39 @@ def _select_chunk_samples(records: List[ChunkRecord], limit: int = 32, max_chars
     return snippets
 
 
+def _normalize_suggestions_list(candidates: List[str], limit: int = 6, max_len: int = 180) -> List[str]:
+    out: List[str] = []
+
+    def push(val: str) -> None:
+        cleaned = val.strip().strip('"').strip()
+        if not cleaned:
+            return
+        # If a single string contains multiple prompts, split on common separators.
+        if cleaned.count('","') or cleaned.count('\" , \"') or cleaned.count('", "'):
+            parts = re.split(r'"\s*,\s*"', cleaned)
+            for part in parts:
+                push(part)
+            return
+        if cleaned.startswith("[") and cleaned.endswith("]"):
+            try:
+                parsed = json.loads(cleaned)
+                if isinstance(parsed, list):
+                    for item in parsed:
+                        if isinstance(item, str):
+                            push(item)
+                    return
+            except Exception:
+                pass
+        cleaned = cleaned[:max_len].strip()
+        if cleaned and cleaned.lower() not in {x.lower() for x in out}:
+            out.append(cleaned)
+
+    for item in candidates:
+        push(str(item))
+
+    return out[:limit]
+
+
 async def _load_chunk_samples_for_suggestions(rag_slug: str, limit: int = 32, max_chars: int = 320) -> List[str]:
     try:
         _, records = load_index(rag_slug)
@@ -381,6 +414,13 @@ async def _generate_rag_suggestions(rag_slug: str, name: str, description: str) 
     snippets = await _load_chunk_samples_for_suggestions(rag_slug, limit=32, max_chars=320)
     payload_summary = f"Assistant name: {name or rag_slug}\nDescription: {description or 'N/A'}"
     snippet_block = "\n".join(f"- {s}" for s in snippets[:32])
+    ingest_logger.info(
+        "rag.suggestions.prompt rag=%s snippets=%s len=%s",
+        rag_slug,
+        len(snippets),
+        len(snippet_block),
+        extra={"rag_slug": rag_slug, "snippets": len(snippets)},
+    )
     messages = [
         {
             "role": "system",
@@ -399,6 +439,12 @@ async def _generate_rag_suggestions(rag_slug: str, name: str, description: str) 
     suggestions: List[str] = []
     if llm_result is not None:
         raw, _ = llm_result
+        ingest_logger.info(
+            "rag.suggestions.raw rag=%s text=%s",
+            rag_slug,
+            raw[:500],
+            extra={"rag_slug": rag_slug},
+        )
         suggestions = _parse_suggestions(raw)
 
     if not suggestions:
@@ -421,19 +467,41 @@ async def _generate_rag_suggestions(rag_slug: str, name: str, description: str) 
             ]
         cleaned = suggestions[:4]
         cleaned = [s.strip(" []\"'") for s in cleaned if s.strip(" []\"'")]
+        cleaned = _normalize_suggestions_list(cleaned, limit=4)
+        ingest_logger.info(
+            "rag.suggestions.fallback rag=%s count=%s",
+            rag_slug,
+            len(cleaned),
+            extra={"rag_slug": rag_slug, "suggestions": cleaned},
+        )
         return cleaned, "fallback_suggestions"
 
-    cleaned = [s.strip(" []\"'") for s in suggestions[:4] if s.strip(" []\"'")]
+    cleaned = _normalize_suggestions_list([s.strip(" []\"'") for s in suggestions[:8] if s.strip(" []\"'")], limit=4)
+    ingest_logger.info(
+        "rag.suggestions.parsed rag=%s count=%s",
+        rag_slug,
+        len(cleaned),
+        extra={"rag_slug": rag_slug, "suggestions": cleaned},
+    )
     return cleaned, None
 
 
 async def _persist_rag_suggestions(rag_slug: str, suggestions: List[str]) -> None:
+    normalized = _normalize_suggestions_list(suggestions, limit=6)
+    ingest_logger.info(
+        "rag.suggestions.store rag=%s count=%s raw=%s normalized=%s",
+        rag_slug,
+        len(normalized),
+        suggestions,
+        normalized,
+        extra={"rag_slug": rag_slug, "suggestions": normalized},
+    )
     col = get_collection()
     await col.update_one(
         {"slug": rag_slug},
         {
             "$set": {
-                "suggestions": suggestions,
+                "suggestions": normalized,
                 "suggestions_updated_at": datetime.now(timezone.utc),
                 "last_updated": datetime.now(timezone.utc),
             }
