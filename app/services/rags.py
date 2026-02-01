@@ -396,13 +396,35 @@ async def _generate_rag_suggestions(rag_slug: str, name: str, description: str) 
         },
     ]
     llm_result = await generate_chat_completion(messages, temperature=0.3, max_tokens=320)
-    if llm_result is None:
-        return [], "llm_unavailable"
-    raw, _ = llm_result
-    suggestions = _parse_suggestions(raw)
+    suggestions: List[str] = []
+    if llm_result is not None:
+        raw, _ = llm_result
+        suggestions = _parse_suggestions(raw)
+
     if not suggestions:
-        return [], "empty_suggestions"
-    return suggestions, None
+        # deterministic fallback when LLM unavailable or empty
+        is_french = bool(re.search(r"[àâçéèêëîïôûùüÿœ]|\\b(le|la|les|des|un|une|pour|comment)\\b", (description or "").lower()))
+        base = name or rag_slug
+        if is_french:
+            suggestions = [
+                f"Peux-tu résumer rapidement {base} ?",
+                f"Comment démarrer avec {base} ?",
+                "Quelles sont les notions clés à retenir ?",
+                "Donne-moi un exemple pratique tiré de cette documentation.",
+            ]
+        else:
+            suggestions = [
+                f"Can you give a quick overview of {base}?",
+                f"How do I get started with {base}?",
+                "What are the key concepts covered?",
+                "Share a practical example from this documentation.",
+            ]
+        cleaned = suggestions[:4]
+        cleaned = [s.strip(" []\"'") for s in cleaned if s.strip(" []\"'")]
+        return cleaned, "fallback_suggestions"
+
+    cleaned = [s.strip(" []\"'") for s in suggestions[:4] if s.strip(" []\"'")]
+    return cleaned, None
 
 
 async def _persist_rag_suggestions(rag_slug: str, suggestions: List[str]) -> None:
@@ -910,13 +932,43 @@ async def rebuild_index(rag_slug: str, user_id: str) -> str:
                     )
 
             await _update_rag_index_summary(rag_slug, total_chunks, dimension)
+
+            job.phase = "suggestions"
+            suggestions: List[str] = []
+            suggestions_error: Optional[str] = None
+            try:
+                suggestions, suggestions_error = await _generate_rag_suggestions(
+                    rag_slug,
+                    rag.get("name", rag_slug),
+                    rag.get("description", ""),
+                )
+                await _persist_rag_suggestions(rag_slug, suggestions)
+            except Exception as exc:
+                suggestions_error = str(exc)
+                ingest_logger.warning(
+                    "rag.suggestions.generate_failed rag=%s error=%s", rag_slug, exc, extra={"rag_slug": rag_slug}
+                )
+                await _persist_rag_suggestions(rag_slug, suggestions)
+            finally:
+                job.suggestions_ready = True
+                job.result = {
+                    "total_chunks": total_chunks,
+                    "dimension": dimension,
+                    "suggestions": len(suggestions),
+                    "suggestions_error": suggestions_error,
+                }
+
             await write_system_log(
                 event="rag.rebuild.complete",
                 rag_slug=rag_slug,
                 user_id=user_id,
-                details={"job_id": job.job_id, "chunks": total_chunks},
+                details={
+                    "job_id": job.job_id,
+                    "chunks": total_chunks,
+                    "suggestions": len(suggestions),
+                    "suggestions_error": suggestions_error,
+                },
             )
-            job.result = {"total_chunks": total_chunks, "dimension": dimension}
         except Exception as exc:  # pragma: no cover — defensive
             job.status = "error"
             job.error = str(exc)
