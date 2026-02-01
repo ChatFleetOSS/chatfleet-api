@@ -468,6 +468,17 @@ def _clean_question(text: str, max_len: int = 120) -> str:
     return q
 
 
+def _has_overlap(question: str, window: List[str], min_shared: int = 2) -> bool:
+    q_tokens = set(re.findall(r"[A-Za-zÀ-ÿ0-9]{3,}", question.lower()))
+    if not q_tokens:
+        return False
+    for snippet in window:
+        s_tokens = set(re.findall(r"[A-Za-zÀ-ÿ0-9]{3,}", snippet.lower()))
+        if len(q_tokens & s_tokens) >= min_shared:
+            return True
+    return False
+
+
 async def _generate_rag_suggestions(
     rag_slug: str, name: str, description: str
 ) -> tuple[List[str], List[str], str, Optional[str]]:
@@ -481,35 +492,41 @@ async def _generate_rag_suggestions(
     lang_primary = _detect_language(flat_snippets, description)
 
     async def _question_for_window(window: List[str], lang: str) -> Optional[str]:
-        snippet_block = "\n".join(f"{idx+1}) {s}" for idx, s in enumerate(window))
+        snippet_block = "\n".join(window)
         messages = [
             {
                 "role": "system",
                 "content": (
-                    "You generate ONE concise end-user question for a documentation assistant. "
-                    "The question MUST be answerable directly from the snippets below; avoid topics not covered. "
-                    "Keep it under 120 characters. "
-                    "Return ONLY the question text, no quotes, no bullets, no JSON. "
-                    "Language: French." if lang == "fr" else "Language: English."
+                    "Given the description below, write ONE concise and very specific end-user question in {lang}. "
+                    "The question MUST be answerable directly and specifically from this description; "
+                    "a part of the description should be the direct answer. "
+                    "Include at least one concrete term/name/command from the description. "
+                    "Avoid generic overviews. Keep under 120 characters. "
+                    "Return ONLY the question text (no quotes, no JSON, no bullets)."
                 ),
             },
             {
                 "role": "user",
-                "content": f"Snippets:\n{snippet_block}\n\nWrite one question answered by these snippets.",
+                "content": f"Description:\n{snippet_block}\n\nWrite one question that this description answers, using its terminology.",
             },
         ]
+        messages[0]["content"] = messages[0]["content"].format(
+            lang="français" if lang == "fr" else "English"
+        )
         llm_result = await generate_chat_completion(messages, temperature=0.4, max_tokens=120)
         if llm_result is None:
             return None
         raw, _ = llm_result
         question = _clean_question(raw)
-        return question or None
+        if not question:
+            return None
+        return question
 
     async def _run_for_lang(lang: str) -> List[str]:
         results: List[str] = []
         for window in windows:
             q = await _question_for_window(window, lang)
-            if q:
+            if q and _has_overlap(q, window, min_shared=1):
                 results.append(q)
             if len(results) >= 4:
                 break
