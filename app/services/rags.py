@@ -19,6 +19,10 @@ from fastapi import UploadFile, status
 from motor.motor_asyncio import AsyncIOMotorCollection
 from PyPDF2 import PdfReader
 from docx import Document as DocxDocument
+from odf.opendocument import load as load_odt
+from odf import teletype
+from odf.text import P as OdtParagraph
+from odf.table import Table as OdtTable, TableRow as OdtTableRow, TableCell as OdtTableCell
 from pymongo.errors import DuplicateKeyError
 
 from app.core.config import settings
@@ -64,6 +68,7 @@ ALLOWED_EXTENSIONS = {
     ".pdf": "application/pdf",
     ".txt": "text/plain",
     ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    ".odt": "application/vnd.oasis.opendocument.text",
 }
 
 
@@ -165,6 +170,37 @@ async def _extract_docx_text(path: str) -> List[PageText]:
     pages = await asyncio.to_thread(_read)
     if not pages:
         raise ValueError("No extractable text found in DOCX")
+    return pages
+
+
+async def _extract_odt_text(path: str) -> List[PageText]:
+    def _read() -> List[PageText]:
+        doc = load_odt(path)
+        pages: List[PageText] = []
+        page = 1
+
+        for para in doc.getElementsByType(OdtParagraph):
+            text = teletype.extractText(para).strip()
+            if text:
+                pages.append(PageText(page=page, text=text))
+                page += 1
+
+        for table in doc.getElementsByType(OdtTable):
+            for row in table.getElementsByType(OdtTableRow):
+                cells = [
+                    teletype.extractText(cell).strip()
+                    for cell in row.getElementsByType(OdtTableCell)
+                    if teletype.extractText(cell).strip()
+                ]
+                if cells:
+                    pages.append(PageText(page=page, text=" | ".join(cells)))
+                    page += 1
+
+        return pages
+
+    pages = await asyncio.to_thread(_read)
+    if not pages:
+        raise ValueError("No extractable text found in ODT")
     return pages
 
 
@@ -563,6 +599,8 @@ async def upload_documents(
                         pages = await _extract_pdf_text(entry["path"])
                     elif mime == "application/vnd.openxmlformats-officedocument.wordprocessingml.document":
                         pages = await _extract_docx_text(entry["path"])
+                    elif mime == "application/vnd.oasis.opendocument.text":
+                        pages = await _extract_odt_text(entry["path"])
                     elif mime == "text/plain":
                         pages = await _extract_txt_text(entry["path"])
                     elif mime == "application/msword":
