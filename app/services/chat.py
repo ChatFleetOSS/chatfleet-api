@@ -264,9 +264,11 @@ def _build_prompt_messages(request: ChatRequest, hits: Sequence[tuple[float, Chu
         {
             "role": "system",
             "content": (
-                "You are a concise assistant. Prefer the provided context to answer. "
-                "If the context is missing or incomplete, answer briefly from your general knowledge and say that sources are unavailable. "
-                "Respond in the user's language using GitHub-flavored Markdown."
+                "Answer ONLY with information from the provided snippets. "
+                "If the snippets do not contain the answer, reply exactly: \"Je n'ai pas cette information dans les extraits fournis.\" "
+                "Do not use outside sources. Copy key terms from the snippets when helpful. "
+                "Respond in the user's language, with a polite, helpful tone, using concise bullet points (max 6) when appropriate. "
+                "Use GitHub-flavored Markdown."
             ),
         },
         {
