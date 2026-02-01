@@ -85,6 +85,8 @@ def _doc_to_summary(doc: Dict[str, Any]) -> RagSummary:
         last_updated=doc.get("last_updated", datetime.now(timezone.utc)),
         visibility=doc.get("visibility", "private"),
         suggestions=doc.get("suggestions", []) or [],
+        suggestions_en=doc.get("suggestions_en", []) or [],
+        suggestions_lang=doc.get("suggestions_lang"),
     )
 
 
@@ -389,6 +391,11 @@ def _parse_suggestions(raw: str, limit: int = 4, max_len: int = 120) -> List[str
                     cleaned = _clean(entry)
                     if cleaned:
                         suggestions.append(cleaned)
+                elif isinstance(entry, dict):
+                    text = entry.get("q") or entry.get("question") or ""
+                    cleaned = _clean(str(text))
+                    if cleaned:
+                        suggestions.append(cleaned)
     except Exception:
         pass
 
@@ -432,6 +439,19 @@ def _detect_language(snippets: List[str], description: str) -> str:
     return "fr" if has_french_char or has_marker else "en"
 
 
+def _filter_by_overlap(candidates: List[str], snippets: List[str]) -> List[str]:
+    if not snippets:
+        return candidates
+    kept: List[str] = []
+    snippet_tokens = [set(re.findall(r"[A-Za-zÀ-ÿ0-9]{3,}", s.lower())) for s in snippets]
+    for q in candidates:
+        q_tokens = set(re.findall(r"[A-Za-zÀ-ÿ0-9]{3,}", q.lower()))
+        match = any(len(q_tokens & tokens) >= 2 for tokens in snippet_tokens)
+        if match:
+            kept.append(q)
+    return kept or candidates
+
+
 async def _generate_rag_suggestions(
     rag_slug: str, name: str, description: str
 ) -> tuple[List[str], List[str], str, Optional[str]]:
@@ -439,7 +459,7 @@ async def _generate_rag_suggestions(
     lang_primary = _detect_language(snippets, description)
 
     payload_summary = f"Assistant name: {name or rag_slug}\nDescription: {description or 'N/A'}"
-    snippet_block = "\n".join(f"- {s}" for s in snippets[:32])
+    snippet_block = "\n".join(f"{idx+1}) {s}" for idx, s in enumerate(snippets[:32]))
     ingest_logger.info(
         "rag.suggestions.prompt rag=%s snippets=%s len=%s lang=%s",
         rag_slug,
@@ -454,8 +474,11 @@ async def _generate_rag_suggestions(
             "role": "system",
             "content": (
                 "You generate 3-4 concise end-user questions for a documentation assistant. "
-                "Use the provided snippets to stay on-topic. Keep each question under 120 characters. "
-                "Respond ONLY with a JSON array of strings, no markdown, no numbering. Language: {{lang}}."
+                "Each question MUST be answerable directly from the provided snippets; avoid topics not covered. "
+                "Keep each question under 120 characters. "
+                "Return ONLY a JSON array; each element should be an object: "
+                "{\"q\": \"question text\", \"snippets\": [numbers of supporting snippets]}. "
+                "No markdown, no numbering. Language: {{lang}}."
             ),
         },
         {
@@ -502,6 +525,7 @@ async def _generate_rag_suggestions(
             [s.strip(" []\"'") for s in suggestions if s.strip(" []\"'")],
             limit=4,
         )
+        normalized = _filter_by_overlap(normalized, snippets)
         return normalized
 
     primary = await _run_for_lang(lang_primary)
@@ -534,6 +558,8 @@ async def _persist_rag_suggestions(
 ) -> None:
     normalized_primary = _normalize_suggestions_list(primary, limit=6)
     normalized_secondary = _normalize_suggestions_list(secondary, limit=6)
+    # Ensure we always store English suggestions when available
+    suggestions_en = normalized_secondary if lang_primary == "fr" else normalized_primary
     ingest_logger.info(
         "rag.suggestions.store rag=%s lang_primary=%s primary=%s secondary=%s",
         rag_slug,
@@ -553,7 +579,7 @@ async def _persist_rag_suggestions(
         {
             "$set": {
                 "suggestions": normalized_primary,
-                "suggestions_en": normalized_secondary if lang_primary == "fr" else normalized_primary,
+                "suggestions_en": suggestions_en,
                 "suggestions_lang": lang_primary,
                 "suggestions_updated_at": datetime.now(timezone.utc),
                 "last_updated": datetime.now(timezone.utc),
