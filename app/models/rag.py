@@ -48,6 +48,8 @@ class RagSummary(BaseModel):
     last_updated: datetime
     visibility: VisibilityEnum = Field(default="private")
     suggestions: List[str] = Field(default_factory=list)
+    suggestions_en: List[str] = Field(default_factory=list)
+    suggestions_lang: Optional[str] = Field(default=None, description="BCP-47 language code for primary suggestions")
 
 
 class RagListResponse(BaseModel):

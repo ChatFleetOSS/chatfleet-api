@@ -410,24 +410,52 @@ def _parse_suggestions(raw: str, limit: int = 4, max_len: int = 120) -> List[str
     return deduped
 
 
-async def _generate_rag_suggestions(rag_slug: str, name: str, description: str) -> tuple[List[str], Optional[str]]:
+def _detect_language(snippets: List[str], description: str) -> str:
+    sample_text = (" ".join(snippets[:10]) or description or "").lower()
+    french_markers = [
+        "le ",
+        "la ",
+        "les ",
+        "des ",
+        "un ",
+        "une ",
+        "pour ",
+        "comment ",
+        "quelles ",
+        "quels ",
+        "guide ",
+        "manuel ",
+        "chapitre ",
+    ]
+    has_french_char = bool(re.search(r"[àâçéèêëîïôûùüÿœ]", sample_text))
+    has_marker = any(marker in sample_text for marker in french_markers)
+    return "fr" if has_french_char or has_marker else "en"
+
+
+async def _generate_rag_suggestions(
+    rag_slug: str, name: str, description: str
+) -> tuple[List[str], List[str], str, Optional[str]]:
     snippets = await _load_chunk_samples_for_suggestions(rag_slug, limit=32, max_chars=320)
+    lang_primary = _detect_language(snippets, description)
+
     payload_summary = f"Assistant name: {name or rag_slug}\nDescription: {description or 'N/A'}"
     snippet_block = "\n".join(f"- {s}" for s in snippets[:32])
     ingest_logger.info(
-        "rag.suggestions.prompt rag=%s snippets=%s len=%s",
+        "rag.suggestions.prompt rag=%s snippets=%s len=%s lang=%s",
         rag_slug,
         len(snippets),
         len(snippet_block),
-        extra={"rag_slug": rag_slug, "snippets": len(snippets)},
+        lang_primary,
+        extra={"rag_slug": rag_slug, "snippets": len(snippets), "lang": lang_primary},
     )
-    messages = [
+
+    base_prompt = [
         {
             "role": "system",
             "content": (
                 "You generate 3-4 concise end-user questions for a documentation assistant. "
                 "Use the provided snippets to stay on-topic. Keep each question under 120 characters. "
-                "Respond ONLY with a JSON array of strings, no markdown, no numbering."
+                "Respond ONLY with a JSON array of strings, no markdown, no numbering. Language: {{lang}}."
             ),
         },
         {
@@ -435,73 +463,98 @@ async def _generate_rag_suggestions(rag_slug: str, name: str, description: str) 
             "content": f"{payload_summary}\n\nSnippets:\n{snippet_block}",
         },
     ]
-    llm_result = await generate_chat_completion(messages, temperature=0.3, max_tokens=320)
-    suggestions: List[str] = []
-    if llm_result is not None:
-        raw, _ = llm_result
-        ingest_logger.info(
-            "rag.suggestions.raw rag=%s text=%s",
-            rag_slug,
-            raw[:500],
-            extra={"rag_slug": rag_slug},
-        )
-        suggestions = _parse_suggestions(raw)
 
-    if not suggestions:
-        # deterministic fallback when LLM unavailable or empty
-        is_french = bool(re.search(r"[àâçéèêëîïôûùüÿœ]|\\b(le|la|les|des|un|une|pour|comment)\\b", (description or "").lower()))
-        base = name or rag_slug
-        if is_french:
-            suggestions = [
-                f"Peux-tu résumer rapidement {base} ?",
-                f"Comment démarrer avec {base} ?",
-                "Quelles sont les notions clés à retenir ?",
-                "Donne-moi un exemple pratique tiré de cette documentation.",
-            ]
-        else:
-            suggestions = [
-                f"Can you give a quick overview of {base}?",
-                f"How do I get started with {base}?",
-                "What are the key concepts covered?",
-                "Share a practical example from this documentation.",
-            ]
-        cleaned = suggestions[:4]
-        cleaned = [s.strip(" []\"'") for s in cleaned if s.strip(" []\"'")]
-        cleaned = _normalize_suggestions_list(cleaned, limit=4)
-        ingest_logger.info(
-            "rag.suggestions.fallback rag=%s count=%s",
-            rag_slug,
-            len(cleaned),
-            extra={"rag_slug": rag_slug, "suggestions": cleaned},
-        )
-        return cleaned, "fallback_suggestions"
+    async def _run_for_lang(lang: str) -> List[str]:
+        messages = [
+            {**base_prompt[0], "content": base_prompt[0]["content"].replace("{{lang}}", "French" if lang == "fr" else "English")},
+            base_prompt[1],
+        ]
+        llm_result = await generate_chat_completion(messages, temperature=0.3, max_tokens=320)
+        suggestions: List[str] = []
+        if llm_result is not None:
+            raw, _ = llm_result
+            ingest_logger.info(
+                "rag.suggestions.raw rag=%s lang=%s text=%s",
+                rag_slug,
+                lang,
+                raw[:500],
+                extra={"rag_slug": rag_slug, "lang": lang},
+            )
+            suggestions = _parse_suggestions(raw)
 
-    cleaned = _normalize_suggestions_list([s.strip(" []\"'") for s in suggestions[:8] if s.strip(" []\"'")], limit=4)
+        if not suggestions:
+            base = name or rag_slug
+            if lang == "fr":
+                suggestions = [
+                    f"Peux-tu résumer rapidement {base} ?",
+                    f"Comment démarrer avec {base} ?",
+                    "Quelles sont les notions clés à retenir ?",
+                    "Donne-moi un exemple pratique tiré de cette documentation.",
+                ]
+            else:
+                suggestions = [
+                    f"Can you give a quick overview of {base}?",
+                    f"How do I get started with {base}?",
+                    "What are the key concepts covered?",
+                    "Share a practical example from this documentation.",
+                ]
+        normalized = _normalize_suggestions_list(
+            [s.strip(" []\"'") for s in suggestions if s.strip(" []\"'")],
+            limit=4,
+        )
+        return normalized
+
+    primary = await _run_for_lang(lang_primary)
+    secondary_lang = "en" if lang_primary == "fr" else "fr"
+    secondary = await _run_for_lang(secondary_lang)
+
     ingest_logger.info(
-        "rag.suggestions.parsed rag=%s count=%s",
+        "rag.suggestions.final rag=%s lang_primary=%s primary=%s secondary_lang=%s secondary=%s",
         rag_slug,
-        len(cleaned),
-        extra={"rag_slug": rag_slug, "suggestions": cleaned},
+        lang_primary,
+        len(primary),
+        secondary_lang,
+        len(secondary),
+        extra={
+            "rag_slug": rag_slug,
+            "lang_primary": lang_primary,
+            "primary": primary,
+            "secondary_lang": secondary_lang,
+            "secondary": secondary,
+        },
     )
-    return cleaned, None
+    return primary, secondary, lang_primary, None
 
 
-async def _persist_rag_suggestions(rag_slug: str, suggestions: List[str]) -> None:
-    normalized = _normalize_suggestions_list(suggestions, limit=6)
+async def _persist_rag_suggestions(
+    rag_slug: str,
+    primary: List[str],
+    secondary: List[str],
+    lang_primary: str,
+) -> None:
+    normalized_primary = _normalize_suggestions_list(primary, limit=6)
+    normalized_secondary = _normalize_suggestions_list(secondary, limit=6)
     ingest_logger.info(
-        "rag.suggestions.store rag=%s count=%s raw=%s normalized=%s",
+        "rag.suggestions.store rag=%s lang_primary=%s primary=%s secondary=%s",
         rag_slug,
-        len(normalized),
-        suggestions,
-        normalized,
-        extra={"rag_slug": rag_slug, "suggestions": normalized},
+        lang_primary,
+        normalized_primary,
+        normalized_secondary,
+        extra={
+            "rag_slug": rag_slug,
+            "lang_primary": lang_primary,
+            "primary": normalized_primary,
+            "secondary": normalized_secondary,
+        },
     )
     col = get_collection()
     await col.update_one(
         {"slug": rag_slug},
         {
             "$set": {
-                "suggestions": normalized,
+                "suggestions": normalized_primary,
+                "suggestions_en": normalized_secondary if lang_primary == "fr" else normalized_primary,
+                "suggestions_lang": lang_primary,
                 "suggestions_updated_at": datetime.now(timezone.utc),
                 "last_updated": datetime.now(timezone.utc),
             }
@@ -887,26 +940,34 @@ async def upload_documents(
 
             job.phase = "suggestions"
             suggestions: List[str] = []
+            suggestions_secondary: List[str] = []
             suggestions_error: Optional[str] = None
+            lang_primary = "fr"
             try:
-                suggestions, suggestions_error = await _generate_rag_suggestions(
+                suggestions, suggestions_secondary, lang_primary, suggestions_error = await _generate_rag_suggestions(
                     rag_slug,
                     rag.get("name", rag_slug),
                     rag.get("description", ""),
                 )
-                await _persist_rag_suggestions(rag_slug, suggestions)
             except Exception as exc:
                 suggestions_error = str(exc)
                 ingest_logger.warning(
                     "rag.suggestions.generate_failed rag=%s error=%s", rag_slug, exc, extra={"rag_slug": rag_slug}
                 )
-                await _persist_rag_suggestions(rag_slug, suggestions)
             finally:
+                await _persist_rag_suggestions(
+                    rag_slug,
+                    suggestions,
+                    suggestions_secondary,
+                    lang_primary,
+                )
                 job.suggestions_ready = True
                 job.result = {
                     "total_chunks": total_chunks,
                     "dimension": dimension,
                     "suggestions": len(suggestions),
+                    "suggestions_secondary": len(suggestions_secondary),
+                    "suggestions_lang": lang_primary,
                 }
                 if suggestions_error:
                     job.result["suggestions_error"] = suggestions_error
@@ -1003,26 +1064,34 @@ async def rebuild_index(rag_slug: str, user_id: str) -> str:
 
             job.phase = "suggestions"
             suggestions: List[str] = []
+            suggestions_secondary: List[str] = []
             suggestions_error: Optional[str] = None
+            lang_primary = "fr"
             try:
-                suggestions, suggestions_error = await _generate_rag_suggestions(
+                suggestions, suggestions_secondary, lang_primary, suggestions_error = await _generate_rag_suggestions(
                     rag_slug,
                     rag.get("name", rag_slug),
                     rag.get("description", ""),
                 )
-                await _persist_rag_suggestions(rag_slug, suggestions)
             except Exception as exc:
                 suggestions_error = str(exc)
                 ingest_logger.warning(
                     "rag.suggestions.generate_failed rag=%s error=%s", rag_slug, exc, extra={"rag_slug": rag_slug}
                 )
-                await _persist_rag_suggestions(rag_slug, suggestions)
             finally:
+                await _persist_rag_suggestions(
+                    rag_slug,
+                    suggestions,
+                    suggestions_secondary,
+                    lang_primary,
+                )
                 job.suggestions_ready = True
                 job.result = {
                     "total_chunks": total_chunks,
                     "dimension": dimension,
                     "suggestions": len(suggestions),
+                    "suggestions_secondary": len(suggestions_secondary),
+                    "suggestions_lang": lang_primary,
                     "suggestions_error": suggestions_error,
                 }
 
