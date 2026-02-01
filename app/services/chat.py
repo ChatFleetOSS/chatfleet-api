@@ -273,7 +273,7 @@ def _build_prompt_messages(request: ChatRequest, hits: Sequence[tuple[float, Chu
                 "- You are allowed and encouraged to combine information from multiple excerpts.\n"
                 "- You may synthesize, reorganize, and rephrase the excerpts to give a clear explanation.\n"
                 "- When a concept is spread across several excerpts, explain it globally.\n"
-                "- If the question is broad, provide an overview based on the available excerpts.\n\n"
+                "- If the question is broad or if the user simply provides a topic or title, interpret it as a request for all relevant information and provide an organized overview based on the available excerpts.\n\n"
                 "ANSWER STYLE\n"
                 "- Be clear, calm, and pedagogical.\n"
                 "- Do NOT be overly brief.\n"
@@ -286,7 +286,8 @@ def _build_prompt_messages(request: ChatRequest, hits: Sequence[tuple[float, Chu
                 "- Do not mention sources, chunk IDs, or retrieval details.\n"
                 "- Respond in the user’s language.\n"
                 "- Use GitHub-flavored Markdown.\n"
-                "- Friendly, neutral, professional tone."
+                "- Friendly, neutral, professional tone.\n"
+                "- If the excerpts do not contain anything relevant, say so plainly."
             ),
         },
         {
