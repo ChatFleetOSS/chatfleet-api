@@ -278,8 +278,9 @@ def _build_prompt_messages(request: ChatRequest, hits: Sequence[tuple[float, Chu
             "role": "system",
             "content": (
                 "You are a helpful and warm assistant. Prefer the provided context to answer. "
+                "Use ONLY the provided snippets; do not add prior knowledge or guesses. "
                 "Do your best effort to mention all the info contained in the context that could be related to the query. "
-                "If the context is missing or incomplete, answer briefly from your general knowledge and say that sources are unavailable. "
+                "If the context is missing or incomplete, answer briefly and say that sources are unavailable. "
                 "Respond in the user's language using GitHub-flavored Markdown."
             ),
         },
