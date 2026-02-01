@@ -33,6 +33,7 @@ prompt_logger = logging.getLogger("chatfleet.prompt")
 prompt_logger.setLevel(logging.INFO)
 RETRIEVAL_MIN_SCORE = 0.2
 CONTEXT_CHAR_BUDGET = 6000
+FALLBACK_ANSWER = "Je n'ai pas cette information dans les extraits fournis."
 
 
 def _format_hits_for_prompt(hits: Sequence[tuple[float, ChunkRecord]]) -> str:
@@ -99,6 +100,18 @@ def _topk_log_text(hits: Sequence[tuple[float, ChunkRecord]], limit: int = 10) -
             f"{idx}) score={score:.3f} doc={record.doc_id} file={record.filename}{page_hint} idx={record.chunk_index} len={len(record.text)}\n{record.text.strip()}"
         )
     return "\n".join(parts)
+
+
+def _has_query_overlap(question: str, hits: Sequence[tuple[float, ChunkRecord]]) -> bool:
+    """Check if at least one query token appears in the retrieved snippets."""
+    tokens = set(re.findall(r"\b\w{4,}\b", question.lower()))
+    if not tokens:
+        return False
+    for _, record in hits:
+        text = record.text.lower()
+        if any(tok in text for tok in tokens):
+            return True
+    return False
 
 
 def _log_prompt_messages(messages: List[Dict[str, str]], rag_slug: str) -> None:
@@ -441,13 +454,21 @@ async def handle_chat(request: ChatRequest, user_id: str) -> ChatResponse:
     cfg = await get_llm_config()
     top_k = request.opts.top_k if request.opts and request.opts.top_k else cfg.top_k_default
     last_message = request.messages[-1]
-    hits = await _retrieve_hits(request.rag_slug, last_message.content, top_k)
+    question = last_message.content
+    hits = await _retrieve_hits(request.rag_slug, question, top_k)
     if not hits:
         raise_http_error(
             "NO_CONTEXT",
             "No supporting snippets were retrieved for this query; cannot answer without context.",
             status.HTTP_503_SERVICE_UNAVAILABLE,
         )
+    if not _has_query_overlap(question, hits):
+        usage = Usage(
+            tokens_in=sum(len(msg.content) for msg in request.messages),
+            tokens_out=0,
+        )
+        corr_id = get_corr_id()
+        return ChatResponse(answer=FALLBACK_ANSWER, citations=[], usage=usage, corr_id=corr_id)
     context_hits = list(_truncate_context(hits))
     corr_id = get_corr_id()
     retrieval_logger.info(
@@ -557,6 +578,24 @@ async def stream_chat(request: ChatRequest, user_id: str) -> AsyncGenerator[str,
             yield f"event: done\ndata: {json.dumps({'usage': {'tokens_in': 0, 'tokens_out': 0}, 'corr_id': corr_id})}\n\n"
         async for chunk in _send_error():
             yield chunk
+        return
+    if not _has_query_overlap(question, hits):
+        async def _send_fallback() -> AsyncGenerator[str, None]:
+            usage = {"tokens_in": sum(len(msg.content) for msg in request.messages), "tokens_out": 0}
+            payload_ready = {"corr_id": corr_id}
+            yield f"event: ready\ndata: {json.dumps(payload_ready)}\n\n"
+            yield f"event: chunk\ndata: {json.dumps({'delta': FALLBACK_ANSWER, 'corr_id': corr_id})}\n\n"
+            yield f"event: citations\ndata: {json.dumps({'citations': [], 'corr_id': corr_id})}\n\n"
+            yield f"event: done\ndata: {json.dumps({'usage': usage, 'corr_id': corr_id})}\n\n"
+            yield f"event: ping\ndata: {json.dumps({'corr_id': corr_id})}\n\n"
+        async for chunk in _send_fallback():
+            yield chunk
+        await write_system_log(
+            event="chat.stream",
+            rag_slug=request.rag_slug,
+            user_id=user_id,
+            details={"corr_id": corr_id, "chunks": 1, "fallback": True},
+        )
         return
     context_hits = list(_truncate_context(hits))
     logger.info(
