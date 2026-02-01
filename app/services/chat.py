@@ -189,9 +189,12 @@ def _strip_sources_section(text: str) -> str:
     result: List[str] = []
     skipping = False
     pattern_heading = re.compile(r"^#{1,6}\s*Sources\b", flags=re.IGNORECASE)
+    pattern_unavailable = re.compile(r"^\*?\s*Sources\s+indisponibles\.?\s*\*?$", flags=re.IGNORECASE)
 
     for line in lines:
         stripped = line.strip()
+        if pattern_unavailable.match(stripped):
+            continue
         if not skipping and (
             pattern_heading.match(stripped) or stripped.lower().startswith("sources:")
         ):

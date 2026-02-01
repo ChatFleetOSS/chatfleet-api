@@ -439,94 +439,93 @@ def _detect_language(snippets: List[str], description: str) -> str:
     return "fr" if has_french_char or has_marker else "en"
 
 
-def _filter_by_overlap(candidates: List[str], snippets: List[str]) -> List[str]:
-    if not snippets:
-        return candidates
-    kept: List[str] = []
-    snippet_tokens = [set(re.findall(r"[A-Za-zÀ-ÿ0-9]{3,}", s.lower())) for s in snippets]
-    for q in candidates:
-        q_tokens = set(re.findall(r"[A-Za-zÀ-ÿ0-9]{3,}", q.lower()))
-        match = any(len(q_tokens & tokens) >= 2 for tokens in snippet_tokens)
-        if match:
-            kept.append(q)
-    return kept or candidates
+def _pick_windows(records: List[ChunkRecord], window_size: int = 4, max_windows: int = 4) -> List[List[str]]:
+    """Evenly sample windows of consecutive chunks to provide local context."""
+    if not records:
+        return []
+    total = len(records)
+    if total <= window_size:
+        return [[(records[i].text or "").strip() for i in range(total)]]
+    stride = max(1, total // max_windows)
+    windows: List[List[str]] = []
+    starts = list(range(0, total, stride))[:max_windows]
+    for start in starts:
+        window = []
+        for rec in records[start : start + window_size]:
+            text = (rec.text or "").strip()
+            if text:
+                window.append(text)
+        if window:
+            windows.append(window)
+    return windows[:max_windows]
+
+
+def _clean_question(text: str, max_len: int = 120) -> str:
+    q = (text or "").strip().strip('"').strip()
+    q = re.sub(r"^[\-\*\d\.\)\s]+", "", q)
+    if len(q) > max_len:
+        q = q[:max_len].rstrip()
+    return q
 
 
 async def _generate_rag_suggestions(
     rag_slug: str, name: str, description: str
 ) -> tuple[List[str], List[str], str, Optional[str]]:
-    snippets = await _load_chunk_samples_for_suggestions(rag_slug, limit=32, max_chars=320)
-    lang_primary = _detect_language(snippets, description)
+    # load all records for window sampling
+    try:
+        _, records = load_index(rag_slug)
+    except FileNotFoundError:
+        records = []
+    windows = _pick_windows(records, window_size=4, max_windows=4)
+    flat_snippets = [s for window in windows for s in window]
+    lang_primary = _detect_language(flat_snippets, description)
 
-    payload_summary = f"Assistant name: {name or rag_slug}\nDescription: {description or 'N/A'}"
-    snippet_block = "\n".join(f"{idx+1}) {s}" for idx, s in enumerate(snippets[:32]))
-    ingest_logger.info(
-        "rag.suggestions.prompt rag=%s snippets=%s len=%s lang=%s",
-        rag_slug,
-        len(snippets),
-        len(snippet_block),
-        lang_primary,
-        extra={"rag_slug": rag_slug, "snippets": len(snippets), "lang": lang_primary},
-    )
-
-    base_prompt = [
-        {
-            "role": "system",
-            "content": (
-                "You generate 3-4 concise end-user questions for a documentation assistant. "
-                "Each question MUST be answerable directly from the provided snippets; avoid topics not covered. "
-                "Keep each question under 120 characters. "
-                "Return ONLY a JSON array; each element should be an object: "
-                "{\"q\": \"question text\", \"snippets\": [numbers of supporting snippets]}. "
-                "No markdown, no numbering. Language: {{lang}}."
-            ),
-        },
-        {
-            "role": "user",
-            "content": f"{payload_summary}\n\nSnippets:\n{snippet_block}",
-        },
-    ]
+    async def _question_for_window(window: List[str], lang: str) -> Optional[str]:
+        snippet_block = "\n".join(f"{idx+1}) {s}" for idx, s in enumerate(window))
+        messages = [
+            {
+                "role": "system",
+                "content": (
+                    "You generate ONE concise end-user question for a documentation assistant. "
+                    "The question MUST be answerable directly from the snippets below; avoid topics not covered. "
+                    "Keep it under 120 characters. "
+                    "Return ONLY the question text, no quotes, no bullets, no JSON. "
+                    "Language: French." if lang == "fr" else "Language: English."
+                ),
+            },
+            {
+                "role": "user",
+                "content": f"Snippets:\n{snippet_block}\n\nWrite one question answered by these snippets.",
+            },
+        ]
+        llm_result = await generate_chat_completion(messages, temperature=0.4, max_tokens=120)
+        if llm_result is None:
+            return None
+        raw, _ = llm_result
+        question = _clean_question(raw)
+        return question or None
 
     async def _run_for_lang(lang: str) -> List[str]:
-        messages = [
-            {**base_prompt[0], "content": base_prompt[0]["content"].replace("{{lang}}", "French" if lang == "fr" else "English")},
-            base_prompt[1],
-        ]
-        llm_result = await generate_chat_completion(messages, temperature=0.3, max_tokens=320)
-        suggestions: List[str] = []
-        if llm_result is not None:
-            raw, _ = llm_result
-            ingest_logger.info(
-                "rag.suggestions.raw rag=%s lang=%s text=%s",
-                rag_slug,
-                lang,
-                raw[:500],
-                extra={"rag_slug": rag_slug, "lang": lang},
-            )
-            suggestions = _parse_suggestions(raw)
-
-        if not suggestions:
+        results: List[str] = []
+        for window in windows:
+            q = await _question_for_window(window, lang)
+            if q:
+                results.append(q)
+            if len(results) >= 4:
+                break
+        if not results:
             base = name or rag_slug
             if lang == "fr":
-                suggestions = [
+                results = [
                     f"Peux-tu résumer rapidement {base} ?",
                     f"Comment démarrer avec {base} ?",
-                    "Quelles sont les notions clés à retenir ?",
-                    "Donne-moi un exemple pratique tiré de cette documentation.",
                 ]
             else:
-                suggestions = [
+                results = [
                     f"Can you give a quick overview of {base}?",
                     f"How do I get started with {base}?",
-                    "What are the key concepts covered?",
-                    "Share a practical example from this documentation.",
                 ]
-        normalized = _normalize_suggestions_list(
-            [s.strip(" []\"'") for s in suggestions if s.strip(" []\"'")],
-            limit=4,
-        )
-        normalized = _filter_by_overlap(normalized, snippets)
-        return normalized
+        return _normalize_suggestions_list(results, limit=4)
 
     primary = await _run_for_lang(lang_primary)
     secondary_lang = "en" if lang_primary == "fr" else "fr"
