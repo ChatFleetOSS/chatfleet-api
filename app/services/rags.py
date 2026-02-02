@@ -10,8 +10,8 @@ import logging
 import hashlib
 import chardet
 import json
-import random
 import re
+import numpy as np
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
@@ -67,6 +67,15 @@ async def ensure_indexes() -> None:
 
 ingest_logger = logging.getLogger("chatfleet.rag.ingest")
 ingest_logger.setLevel(logging.INFO)
+
+# Suggestions generator constants
+SUGGESTIONS_VERSION = "bilingual_suggestions_v2.1_scored_clean_embeddings"
+SUGGESTION_SIM_THRESHOLD = 0.65
+WINDOW_SIZE = 4
+WINDOW_COUNT = 8
+MAX_SUGGESTIONS = 6
+MAX_CANDIDATES_PER_WINDOW = 2
+QUESTION_MAX_LEN = 120
 
 ALLOWED_EXTENSIONS = {
     ".pdf": "application/pdf",
@@ -439,28 +448,11 @@ def _detect_language(snippets: List[str], description: str) -> str:
     return "fr" if has_french_char or has_marker else "en"
 
 
-def _pick_windows(records: List[ChunkRecord], window_size: int = 4, max_windows: int = 4) -> List[List[str]]:
-    """Evenly sample windows of consecutive chunks to provide local context."""
-    if not records:
-        return []
-    total = len(records)
-    if total <= window_size:
-        return [[(records[i].text or "").strip() for i in range(total)]]
-    stride = max(1, total // max_windows)
-    windows: List[List[str]] = []
-    starts = list(range(0, total, stride))[:max_windows]
-    for start in starts:
-        window = []
-        for rec in records[start : start + window_size]:
-            text = (rec.text or "").strip()
-            if text:
-                window.append(text)
-        if window:
-            windows.append(window)
-    return windows[:max_windows]
+def _build_window_text(window: List[str]) -> str:
+    return "\n---\n".join([s.strip() for s in window if s.strip()])
 
 
-def _clean_question(text: str, max_len: int = 120) -> str:
+def _clean_question(text: str, max_len: int = QUESTION_MAX_LEN) -> str:
     q = (text or "").strip().strip('"').strip()
     q = re.sub(r"^[\-\*\d\.\)\s]+", "", q)
     if len(q) > max_len:
@@ -468,87 +460,246 @@ def _clean_question(text: str, max_len: int = 120) -> str:
     return q
 
 
-def _has_overlap(question: str, window: List[str], min_shared: int = 2) -> bool:
-    q_tokens = set(re.findall(r"[A-Za-zÀ-ÿ0-9]{3,}", question.lower()))
-    if not q_tokens:
-        return False
-    for snippet in window:
-        s_tokens = set(re.findall(r"[A-Za-zÀ-ÿ0-9]{3,}", snippet.lower()))
-        if len(q_tokens & s_tokens) >= min_shared:
-            return True
-    return False
+def _score_window_text(text: str) -> float:
+    """Heuristic score for window usefulness."""
+    if not text:
+        return 0.0
+    t = text.lower()
+    score = 0.0
+    policy_words = [
+        "doit", "obligatoire", "interdit", "autorisé", "plafond", "justificatif",
+        "délai", "remboursement", "procédure", "étape", "condition", "doivent",
+        "must", "shall", "prohibited", "allowed", "forbidden", "deadline",
+        "reimbursement", "procedure", "step", "required", "obligation"
+    ]
+    for w in policy_words:
+        if w in t:
+            score += 1.5
+    # Enumerations / bullet patterns
+    if re.search(r"^\d+\.", text, re.MULTILINE) or re.search(r"(?m)^[-•–]\s", text):
+        score += 1.0
+    if "étape" in t or "step" in t:
+        score += 1.0
+    # Token density
+    tokens = re.findall(r"[A-Za-zÀ-ÿ0-9]{3,}", t)
+    if tokens:
+        unique = len(set(tokens))
+        score += min(unique / max(len(tokens), 1) * 4, 2.0)
+    # Penalize very short text
+    if len(t) < 120:
+        score -= 1.0
+    return score
 
+
+def _cosine_sim_matrix(vecs: np.ndarray) -> np.ndarray:
+    if vecs.size == 0:
+        return np.zeros((0, 0))
+    norm = np.linalg.norm(vecs, axis=1, keepdims=True) + 1e-9
+    normalized = vecs / norm
+    return normalized @ normalized.T
+
+
+async def _embed_strings(texts: List[str]) -> np.ndarray:
+    if not texts:
+        return np.zeros((0, 0))
+    vectors = await embed_texts(texts)
+    if not vectors:
+        raise RuntimeError("Embedding failed: empty result")
+    dim = len(vectors[0])
+    arr = np.array(vectors, dtype=float)
+    if arr.ndim != 2 or arr.shape[1] != dim:
+        raise RuntimeError("Embedding dimensions inconsistent")
+    return arr
+
+
+def _dedupe_questions(candidates: List[str]) -> List[str]:
+    seen: set[str] = set()
+    out: List[str] = []
+    for q in candidates:
+        key = re.sub(r"\s+", " ", q.lower().strip(" .?!"))
+        if key and key not in seen:
+            seen.add(key)
+            out.append(q)
+    return out
+
+
+def _make_windows(records: List[ChunkRecord], window_size: int = WINDOW_SIZE) -> List[List[str]]:
+    windows: List[List[str]] = []
+    total = len(records)
+    if total == 0:
+        return windows
+    stride = max(1, total // (WINDOW_COUNT * 2) or 1)
+    for start in range(0, total, stride):
+        window = []
+        for rec in records[start : start + window_size]:
+            txt = (rec.text or "").strip()
+            if txt:
+                window.append(txt)
+        if window:
+            windows.append(window)
+    return windows
+
+
+async def _select_windows(records: List[ChunkRecord]) -> List[Tuple[str, List[str]]]:
+    """Return list of (window_text, window_chunks) selected with scoring + diversity."""
+    windows = _make_windows(records, window_size=WINDOW_SIZE)
+    if not windows:
+        return []
+    texts = [_build_window_text(w) for w in windows]
+    scores = [_score_window_text(t) for t in texts]
+    try:
+        embeds = await _embed_strings(texts)
+    except Exception as exc:
+        raise RuntimeError(f"Embedding windows failed: {exc}")
+    sim_matrix = _cosine_sim_matrix(embeds)
+    order = sorted(range(len(texts)), key=lambda i: scores[i], reverse=True)
+    selected: List[int] = []
+    for idx in order:
+        if len(selected) >= WINDOW_COUNT:
+            break
+        if not selected:
+            selected.append(idx)
+            continue
+        too_similar = False
+        for j in selected:
+            if sim_matrix[idx, j] > 0.9:
+                too_similar = True
+                break
+        if not too_similar:
+            selected.append(idx)
+    return [(texts[i], windows[i]) for i in selected]
 
 async def _generate_rag_suggestions(
     rag_slug: str, name: str, description: str
 ) -> tuple[List[str], List[str], str, Optional[str]]:
-    # load all records for window sampling
+    # load records
     try:
         _, records = load_index(rag_slug)
     except FileNotFoundError:
         records = []
-    windows = _pick_windows(records, window_size=4, max_windows=4)
-    flat_snippets = [s for window in windows for s in window]
+    windows_selected = await _select_windows(records)
+    flat_snippets = [txt for txt, _ in windows_selected]
     lang_primary = _detect_language(flat_snippets, description)
 
-    async def _question_for_window(window: List[str], lang: str) -> Optional[str]:
-        snippet_block = "\n---\n".join([s.strip() for s in window if s.strip()])
+    async def _generate_candidates_for_window(window_text: str, lang: str) -> List[str]:
         prompt = (
-            f"Tu es un assistant qui génère UNE question utilisateur concise et très spécifique dans la langue : "
+            f"Tu es un assistant qui génère 1 à 2 questions UTILISATEUR concises et très spécifiques en "
             f"{'français' if lang == 'fr' else 'English'}.\n"
             "RÈGLES:\n"
-            "- Utilise UNIQUEMENT le CONTEXTE ci-dessous.\n"
-            "- La question doit être directement et précisément répondue par le CONTEXTE ; une partie du CONTEXTE doit être la réponse.\n"
-            "- Inclure au moins un terme/nom/commande concret présent dans le CONTEXTE.\n"
-            "- Pas de résumé générique ; pas de hors-sujet.\n"
-            "- Moins de 120 caractères. Retourne uniquement le texte de la question (sans guillemets, sans JSON, sans puces).\n\n"
-            "CONTEXTE:\n"
-            f"{snippet_block}\n\n"
-            "QUESTION:\n"
+            "- Utilise UNIQUEMENT le CONTEXTE.\n"
+            "- Chaque question doit pouvoir être répondue précisément par le CONTEXTE (une partie du texte est la réponse directe).\n"
+            "- Inclure au moins un terme/nom/commande concret du CONTEXTE.\n"
+            "- Pas de résumé générique, pas de hors-sujet.\n"
+            "- Moins de 120 caractères. Retourne seulement les questions, une par ligne, sans puces ni guillemets.\n"
+            f"CONTEXTE:\n{window_text}\n\nQUESTIONS:\n"
         )
         messages = [{"role": "user", "content": prompt}]
-        llm_result = await generate_chat_completion(messages, temperature=0.25, max_tokens=140)
+        llm_result = await generate_chat_completion(
+            messages, temperature=0.0, max_tokens=260
+        )
         if llm_result is None:
-            return None
+            return []
         raw, _ = llm_result
-        question = _clean_question(raw)
-        if not question:
-            return None
-        return question
+        lines = [line.strip() for line in raw.splitlines() if line.strip()]
+        cleaned = [_clean_question(line) for line in lines]
+        return [c for c in cleaned if c]
 
-    async def _run_for_lang(lang: str) -> List[str]:
-        results: List[str] = []
-        for window in windows:
-            q = await _question_for_window(window, lang)
-            if q and _has_overlap(q, window, min_shared=1):
-                results.append(q)
-            if len(results) >= 4:
+    async def _accept_questions(window_text: str, candidates: List[str]) -> List[str]:
+        if not candidates:
+            return []
+        # embed window once + candidates batch
+        try:
+            vectors = await _embed_strings([window_text] + candidates)
+        except Exception as exc:
+            raise RuntimeError(f"Embedding questions failed: {exc}")
+        window_vec = vectors[0]
+        cand_vecs = vectors[1:]
+        accepted: List[str] = []
+        for q, vec in zip(candidates, cand_vecs):
+            sim = float(np.dot(window_vec, vec) / ((np.linalg.norm(window_vec) + 1e-9) * (np.linalg.norm(vec) + 1e-9)))
+            if sim >= SUGGESTION_SIM_THRESHOLD:
+                accepted.append(q)
+        return accepted
+
+    async def _run_for_lang(lang: str) -> Tuple[List[str], bool]:
+        accepted: List[str] = []
+        used_fallback = False
+        for window_text, _ in windows_selected:
+            if len(accepted) >= MAX_SUGGESTIONS * 2:
                 break
-        if not results:
+            cands = await _generate_candidates_for_window(window_text, lang)
+            if cands:
+                cands = cands[:MAX_CANDIDATES_PER_WINDOW]
+            filtered = await _accept_questions(window_text, cands)
+            accepted.extend(filtered)
+        accepted = _dedupe_questions(accepted)
+        accepted = accepted[: MAX_SUGGESTIONS * 2]
+        if not accepted:
             base = name or rag_slug
+            used_fallback = True
             if lang == "fr":
-                results = [
+                accepted = [
                     f"Peux-tu résumer rapidement {base} ?",
                     f"Comment démarrer avec {base} ?",
                 ]
             else:
-                results = [
+                accepted = [
                     f"Can you give a quick overview of {base}?",
                     f"How do I get started with {base}?",
                 ]
-        return _normalize_suggestions_list(results, limit=4)
+        return _normalize_suggestions_list(accepted, limit=MAX_SUGGESTIONS), used_fallback
 
-    primary = await _run_for_lang(lang_primary)
+    async def _translate_questions(questions: List[str], target_lang: str) -> List[str]:
+        if not questions:
+            return []
+        lang_label = "français" if target_lang == "fr" else "English"
+        joined = "\n".join(questions)
+        prompt = (
+            f"Traduis chaque question ci-dessous en {lang_label}.\n"
+            "RÈGLES:\n"
+            "- Garde une question par ligne, même ordre, pas de puces, pas de guillemets.\n"
+            "- Moins de 120 caractères par question.\n\n"
+            f"QUESTIONS:\n{joined}\n\nTRADUCTIONS:"
+        )
+        messages = [{"role": "user", "content": prompt}]
+        llm_result = await generate_chat_completion(messages, temperature=0.0, max_tokens=260)
+        if llm_result is None:
+            return []
+        raw, _ = llm_result
+        lines = [l.strip() for l in raw.splitlines() if l.strip()]
+        cleaned = [_clean_question(l) for l in lines]
+        cleaned = [c for c in cleaned if c]
+        if len(cleaned) >= len(questions):
+            return cleaned[: len(questions)]
+        return cleaned
+
+    # Primary language generation
+    primary, primary_fallback = await _run_for_lang(lang_primary)
     secondary_lang = "en" if lang_primary == "fr" else "fr"
-    secondary = await _run_for_lang(secondary_lang)
+
+    secondary = await _translate_questions(primary, secondary_lang)
+    secondary_fallback = False
+    if len(secondary) < len(primary):
+        # Try generating in secondary language directly
+        generated_secondary, sec_fb = await _run_for_lang(secondary_lang)
+        secondary_fallback = sec_fb or not generated_secondary
+        secondary = generated_secondary or secondary
+
+    # Ensure EN field is populated per schema
+    if lang_primary == "fr":
+        suggestions_en = secondary or primary
+    else:
+        suggestions_en = primary if lang_primary == "en" else secondary
 
     ingest_logger.info(
-        "rag.suggestions.final rag=%s lang_primary=%s primary=%s secondary_lang=%s secondary=%s",
+        "rag.suggestions.final rag=%s lang_primary=%s primary=%s secondary_lang=%s secondary=%s fallback_primary=%s fallback_secondary=%s",
         rag_slug,
         lang_primary,
         len(primary),
         secondary_lang,
         len(secondary),
+        primary_fallback,
+        secondary_fallback,
         extra={
             "rag_slug": rag_slug,
             "lang_primary": lang_primary,
@@ -557,7 +708,7 @@ async def _generate_rag_suggestions(
             "secondary": secondary,
         },
     )
-    return primary, secondary, lang_primary, None
+    return primary, suggestions_en, lang_primary, None, primary_fallback or secondary_fallback
 
 
 async def _persist_rag_suggestions(
@@ -565,11 +716,30 @@ async def _persist_rag_suggestions(
     primary: List[str],
     secondary: List[str],
     lang_primary: str,
+    fallback_used: bool,
 ) -> None:
-    normalized_primary = _normalize_suggestions_list(primary, limit=6)
-    normalized_secondary = _normalize_suggestions_list(secondary, limit=6)
+    normalized_primary = _normalize_suggestions_list(primary, limit=MAX_SUGGESTIONS)
+    normalized_secondary = _normalize_suggestions_list(secondary, limit=MAX_SUGGESTIONS)
     # Ensure we always store English suggestions when available
     suggestions_en = normalized_secondary if lang_primary == "fr" else normalized_primary
+    meta = {
+        "version": SUGGESTIONS_VERSION,
+        "generated_at": datetime.now(timezone.utc),
+        "model": "runtime",  # stored runtime config
+        "temperature": 0.0,
+        "max_tokens": 260,
+        "window_count": WINDOW_COUNT,
+        "window_size": WINDOW_SIZE,
+        "window_strategy": "scored",
+        "embed_model": "sentence-transformers/all-MiniLM-L6-v2",
+        "sim_threshold": SUGGESTION_SIM_THRESHOLD,
+        "verify_enabled": True,
+        "fallback_used": fallback_used,
+        "stats": {
+            "primary": len(normalized_primary),
+            "secondary": len(normalized_secondary),
+        },
+    }
     ingest_logger.info(
         "rag.suggestions.store rag=%s lang_primary=%s primary=%s secondary=%s",
         rag_slug,
@@ -592,6 +762,10 @@ async def _persist_rag_suggestions(
                 "suggestions_en": suggestions_en,
                 "suggestions_lang": lang_primary,
                 "suggestions_updated_at": datetime.now(timezone.utc),
+                "suggestions_version": SUGGESTIONS_VERSION,
+                "suggestions_generated_at": datetime.now(timezone.utc),
+                "suggestions_meta": meta,
+                "suggestions_is_fallback": fallback_used,
                 "last_updated": datetime.now(timezone.utc),
             }
         },
@@ -698,6 +872,62 @@ async def get_docs(slug: str) -> RagDocsResponse:
         raise_http_error("RAG_NOT_FOUND", f"RAG '{slug}' not found", status_code=404)
     docs = [_doc_to_rag_doc(entry) for entry in rag.get("docs", [])]
     return RagDocsResponse(**with_corr_id({"rag_slug": slug, "docs": [doc.model_dump() for doc in docs]}))
+
+
+class SuggestionRegenerationResult:
+    def __init__(self, rag_slug: str, fallback_used: bool, primary_count: int, secondary_count: int):
+        self.rag_slug = rag_slug
+        self.fallback_used = fallback_used
+        self.primary_count = primary_count
+        self.secondary_count = secondary_count
+
+
+async def regenerate_suggestions_for_rag(rag_slug: str, force: bool = False, dry_run: bool = False) -> SuggestionRegenerationResult:
+    rag = await get_rag_by_slug(rag_slug)
+    if not rag:
+        raise ValueError(f"RAG '{rag_slug}' not found")
+    if not force and rag.get("suggestions_version") == SUGGESTIONS_VERSION and not dry_run:
+        return SuggestionRegenerationResult(rag_slug, rag.get("suggestions_is_fallback", False), len(rag.get("suggestions", []) or []), len(rag.get("suggestions_en", []) or []))
+    suggestions: List[str] = []
+    suggestions_en: List[str] = []
+    lang_primary = "fr"
+    fallback_used = False
+    try:
+        (
+            suggestions,
+            suggestions_en,
+            lang_primary,
+            suggestions_error,
+            fallback_used,
+        ) = await _generate_rag_suggestions(
+            rag_slug,
+            rag.get("name", rag_slug),
+            rag.get("description", ""),
+        )
+        if suggestions_error:
+            raise RuntimeError(suggestions_error)
+    except Exception as exc:
+        fallback_used = True
+        suggestions = [
+            f"Peux-tu résumer rapidement {rag.get('name', rag_slug)} ?",
+            f"Comment démarrer avec {rag.get('name', rag_slug)} ?",
+        ]
+        suggestions_en = [
+            f"Can you give a quick overview of {rag.get('name', rag_slug)}?",
+            f"How do I get started with {rag.get('name', rag_slug)}?",
+        ]
+        ingest_logger.warning("rag.suggestions.regenerate_failed rag=%s error=%s", rag_slug, exc, extra={"rag_slug": rag_slug})
+        if dry_run:
+            return SuggestionRegenerationResult(rag_slug, fallback_used, len(suggestions), len(suggestions_en))
+    if not dry_run:
+        await _persist_rag_suggestions(
+            rag_slug,
+            suggestions,
+            suggestions_en,
+            lang_primary,
+            fallback_used,
+        )
+    return SuggestionRegenerationResult(rag_slug, fallback_used, len(suggestions), len(suggestions_en))
 
 
 async def get_index_status(slug: str) -> IndexStatusResponse:
@@ -976,11 +1206,18 @@ async def upload_documents(
 
             job.phase = "suggestions"
             suggestions: List[str] = []
-            suggestions_secondary: List[str] = []
+            suggestions_en: List[str] = []
             suggestions_error: Optional[str] = None
             lang_primary = "fr"
+            suggestions_fallback = False
             try:
-                suggestions, suggestions_secondary, lang_primary, suggestions_error = await _generate_rag_suggestions(
+                (
+                    suggestions,
+                    suggestions_en,
+                    lang_primary,
+                    suggestions_error,
+                    suggestions_fallback,
+                ) = await _generate_rag_suggestions(
                     rag_slug,
                     rag.get("name", rag_slug),
                     rag.get("description", ""),
@@ -994,16 +1231,18 @@ async def upload_documents(
                 await _persist_rag_suggestions(
                     rag_slug,
                     suggestions,
-                    suggestions_secondary,
+                    suggestions_en,
                     lang_primary,
+                    suggestions_fallback,
                 )
                 job.suggestions_ready = True
                 job.result = {
                     "total_chunks": total_chunks,
                     "dimension": dimension,
                     "suggestions": len(suggestions),
-                    "suggestions_secondary": len(suggestions_secondary),
+                    "suggestions_secondary": len(suggestions_en),
                     "suggestions_lang": lang_primary,
+                    "suggestions_fallback": suggestions_fallback,
                 }
                 if suggestions_error:
                     job.result["suggestions_error"] = suggestions_error
@@ -1100,11 +1339,18 @@ async def rebuild_index(rag_slug: str, user_id: str) -> str:
 
             job.phase = "suggestions"
             suggestions: List[str] = []
-            suggestions_secondary: List[str] = []
+            suggestions_en: List[str] = []
             suggestions_error: Optional[str] = None
             lang_primary = "fr"
+            suggestions_fallback = False
             try:
-                suggestions, suggestions_secondary, lang_primary, suggestions_error = await _generate_rag_suggestions(
+                (
+                    suggestions,
+                    suggestions_en,
+                    lang_primary,
+                    suggestions_error,
+                    suggestions_fallback,
+                ) = await _generate_rag_suggestions(
                     rag_slug,
                     rag.get("name", rag_slug),
                     rag.get("description", ""),
@@ -1118,8 +1364,9 @@ async def rebuild_index(rag_slug: str, user_id: str) -> str:
                 await _persist_rag_suggestions(
                     rag_slug,
                     suggestions,
-                    suggestions_secondary,
+                    suggestions_en,
                     lang_primary,
+                    suggestions_fallback,
                 )
                 job.suggestions_ready = True
                 job.result = {

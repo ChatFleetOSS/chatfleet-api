@@ -293,6 +293,7 @@ def _build_prompt_messages(request: ChatRequest, hits: Sequence[tuple[float, Chu
                 "You are a helpful and warm assistant. Use ONLY the provided context. "
                 "Every claim must be supported by the context; do not add generic advice or steps that are not present in the excerpts. "
                 "Do not add external or prior knowledge. If the context is thin, give a short, cautious answer and state that more detail is not available in the excerpts. "
+                "If the answer is long, provide a structured synthesis in 5 to 8 points maximum (with sub-points if needed). "
                 "Respond in the user's language using GitHub-flavored Markdown."
             ),
         },
@@ -414,7 +415,7 @@ async def _generate_answer(
         else cfg.temperature_default
     )
     max_tokens = (
-        request.opts.max_tokens if request.opts and request.opts.max_tokens else 500
+        request.opts.max_tokens if request.opts and request.opts.max_tokens else 1200
     )
 
     llm_result = await generate_chat_completion(
