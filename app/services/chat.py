@@ -37,6 +37,7 @@ FALLBACK_ANSWER = "Je n'ai pas cette information dans les extraits fournis."
 
 
 def _format_hits_for_prompt(hits: Sequence[tuple[float, ChunkRecord]]) -> str:
+    """Legacy formatter (kept for logging)."""
     if not hits:
         return "No supporting snippets were retrieved from the knowledge base."
     lines: List[str] = []
@@ -53,6 +54,16 @@ def _format_hits_for_prompt(hits: Sequence[tuple[float, ChunkRecord]]) -> str:
         )
         lines.append(source)
     return "\n\n".join(lines)
+
+
+def _format_hits_clean(hits: Sequence[tuple[float, ChunkRecord]], limit: int = 6) -> str:
+    """Clean formatter for the model: only text, simple delimiters."""
+    extracts: List[str] = []
+    for idx, (_, record) in enumerate(hits[:limit], start=1):
+        extracts.append(f"--- EXTRACT {idx} ---\n{record.text.strip()}")
+    if not extracts:
+        return ""
+    return "\n\n".join(extracts)
 
 
 def _preview_hits(hits: Sequence[tuple[float, ChunkRecord]], limit: int = 3) -> List[Dict[str, Any]]:
@@ -272,26 +283,36 @@ def _ensure_paragraph_spacing(text: str) -> str:
 
 
 def _build_prompt_messages(request: ChatRequest, hits: Sequence[tuple[float, ChunkRecord]]) -> List[Dict[str, str]]:
-    context = _format_hits_for_prompt(hits)
+    context_clean = _format_hits_clean(hits)
+    context_log = _format_hits_for_prompt(hits)
+    question = request.messages[-1].content if request.messages else ""
     system_messages: List[Dict[str, str]] = [
         {
             "role": "system",
             "content": (
                 "You are a helpful and warm assistant. Use ONLY the provided context. "
                 "Every claim must be supported by the context; do not add generic advice or steps that are not present in the excerpts. "
-                "Structure a helpful answer that aggregates all relevant information in the context about the user's query. "
                 "Do not add external or prior knowledge. If the context is thin, give a short, cautious answer and state that more detail is not available in the excerpts. "
-                "Tell the user what you found and how it may help them. Respond in the user's language using GitHub-flavored Markdown."
-            ),
-        },
-        {
-            "role": "system",
-            "content": (
-                "Context:\n"
-                f"{context}"
+                "Respond in the user's language using GitHub-flavored Markdown."
             ),
         },
     ]
+
+    user_prompt = (
+        "RÈGLES:\n"
+        "- Utilise UNIQUEMENT le CONTEXTE.\n"
+        "- Chaque point de ta réponse doit être soutenu par le CONTEXTE.\n"
+        "- Si le CONTEXTE ne contient pas la réponse, répond exactement : Je n'ai pas cette information dans les extraits fournis.\n"
+        "- Ne donne pas de conseils génériques ni de contenu absent du CONTEXTE.\n"
+        "\n"
+        "CONTEXTE:\n"
+        f"{context_clean}\n\n"
+        "QUESTION:\n"
+        f"{question}\n\n"
+        "RÉPONSE:\n"
+    )
+
+    system_messages.append({"role": "user", "content": user_prompt})
 
     # Preserve the last turns of the conversation (up to 10 messages).
     history: List[Dict[str, str]] = []
@@ -305,7 +326,7 @@ def _build_prompt_messages(request: ChatRequest, hits: Sequence[tuple[float, Chu
                 "corr_id": get_corr_id(),
                 "system_count": len(system_messages),
                 "history_count": len(history),
-                "context_preview": context[:500],
+                "context_preview": context_log[:500],
             },
         )
     except Exception:
