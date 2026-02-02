@@ -492,28 +492,22 @@ async def _generate_rag_suggestions(
     lang_primary = _detect_language(flat_snippets, description)
 
     async def _question_for_window(window: List[str], lang: str) -> Optional[str]:
-        snippet_block = "\n".join(window)
-        messages = [
-            {
-                "role": "system",
-                "content": (
-                    "Given the description below, write ONE concise and very specific end-user question in {lang}. "
-                    "The question MUST be answerable directly and specifically from this description; "
-                    "a part of the description should be the direct answer. "
-                    "Include at least one concrete term/name/command from the description. "
-                    "Avoid generic overviews. Keep under 120 characters. "
-                    "Return ONLY the question text (no quotes, no JSON, no bullets)."
-                ),
-            },
-            {
-                "role": "user",
-                "content": f"Description:\n{snippet_block}\n\nWrite one question that this description answers, using its terminology.",
-            },
-        ]
-        messages[0]["content"] = messages[0]["content"].format(
-            lang="français" if lang == "fr" else "English"
+        snippet_block = "\n---\n".join([s.strip() for s in window if s.strip()])
+        prompt = (
+            f"Tu es un assistant qui génère UNE question utilisateur concise et très spécifique dans la langue : "
+            f"{'français' if lang == 'fr' else 'English'}.\n"
+            "RÈGLES:\n"
+            "- Utilise UNIQUEMENT le CONTEXTE ci-dessous.\n"
+            "- La question doit être directement et précisément répondue par le CONTEXTE ; une partie du CONTEXTE doit être la réponse.\n"
+            "- Inclure au moins un terme/nom/commande concret présent dans le CONTEXTE.\n"
+            "- Pas de résumé générique ; pas de hors-sujet.\n"
+            "- Moins de 120 caractères. Retourne uniquement le texte de la question (sans guillemets, sans JSON, sans puces).\n\n"
+            "CONTEXTE:\n"
+            f"{snippet_block}\n\n"
+            "QUESTION:\n"
         )
-        llm_result = await generate_chat_completion(messages, temperature=0.4, max_tokens=120)
+        messages = [{"role": "user", "content": prompt}]
+        llm_result = await generate_chat_completion(messages, temperature=0.25, max_tokens=140)
         if llm_result is None:
             return None
         raw, _ = llm_result
