@@ -23,10 +23,14 @@ function applyBearer(req, token) {
   if (!token) {
     return;
   }
-  req.setHeader?.("Authorization", `Bearer ${token}`);
-  req.setHeader?.("authorization", `Bearer ${token}`);
-  req.headers["Authorization"] = `Bearer ${token}`;
-  req.headers["authorization"] = `Bearer ${token}`;
+  const bearer = `Bearer ${token}`;
+  req.headers = req.headers ?? {};
+  req.setHeader?.("Authorization", bearer);
+  req.setHeader?.("authorization", bearer);
+  req.addHeader?.("Authorization", bearer);
+  req.addHeader?.("authorization", bearer);
+  req.headers["Authorization"] = bearer;
+  req.headers["authorization"] = bearer;
 }
 
 async function httpFetch(input, init) {
@@ -161,8 +165,10 @@ async function ensureUserState(baseUrl) {
 }
 
 async function main() {
-  const baseUrl = process.env.PROVIDER_BASE_URL ?? "http://localhost:8000";
+  const baseUrl = process.env.PROVIDER_BASE_URL ?? "http://127.0.0.1:8000";
   const pactsDir = path.resolve(process.cwd(), "pacts");
+
+  console.log(`Using provider base URL: ${baseUrl}`);
 
   const verifier = new Verifier({
     providerBaseUrl: baseUrl,
@@ -178,17 +184,22 @@ async function main() {
       },
     },
     requestFilter: (req, _res, next) => {
-      const pathLower = String(req.path || req.url || "").toLowerCase();
-      if (pathLower.includes("/api/rag/upload") && tokens.admin) {
-        applyBearer(req, tokens.admin);
+      try {
+        const pathLower = String(req.path || req.url || "").toLowerCase();
+        if (pathLower.includes("/api/rag/upload") && tokens.admin) {
+          applyBearer(req, tokens.admin);
+        }
+        if (pathLower.includes("/api/rag/delete") && tokens.admin) {
+          applyBearer(req, tokens.admin);
+        }
+        if (pathLower.includes("/api/chat") && tokens.user) {
+          applyBearer(req, tokens.user);
+        }
+        next();
+      } catch (error) {
+        console.error("✖ Request filter failed", error);
+        next(error);
       }
-      if (pathLower.includes("/api/rag/delete") && tokens.admin) {
-        applyBearer(req, tokens.admin);
-      }
-      if (pathLower.includes("/api/chat") && tokens.user) {
-        applyBearer(req, tokens.user);
-      }
-      next();
     },
   });
 
