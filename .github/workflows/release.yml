@@ -5,7 +5,7 @@ on:
     tags: [ 'v*.*.*' ]
 
 permissions:
-  contents: read
+  contents: write
   packages: write
   id-token: write
 
@@ -53,6 +53,9 @@ jobs:
           file: ./Dockerfile
           push: true
           platforms: linux/amd64,linux/arm64
+          build-args: |
+            BUILD_VERSION=${{ github.ref_name }}
+            BUILD_COMMIT=${{ github.sha }}
           tags: |
             ${{ steps.meta.outputs.tags }}
             ghcr.io/chatfleetoss/chatfleet-api:latest
@@ -63,3 +66,18 @@ jobs:
         env:
           COSIGN_EXPERIMENTAL: 1
         run: cosign sign --yes ${{ env.IMAGE_REF }}:${{ github.ref_name }}
+      - name: Publish GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+      - name: Infra promotion reminder
+        run: |
+          {
+            echo "## Infra next step"
+            echo
+            echo "Once the matching frontend release exists, run the \`Promote Channel\` workflow in \`chatfleet-infra\`."
+            echo
+            echo "- channel: \`stable\`"
+            echo "- api_tag: \`${{ github.ref_name }}\`"
+            echo "- web_tag: \`<matching web tag>\`"
+          } >> "$GITHUB_STEP_SUMMARY"

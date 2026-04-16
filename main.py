@@ -47,8 +47,8 @@ logger = logging.getLogger("chatfleet.backend")
 def create_app() -> FastAPI:
     app = FastAPI(
         title="ChatFleet API",
-        version="0.1.1",
-        description="ChatFleet — multi-RAG chatbot platform (MVP v0.1.1)",
+        version=settings.build_version,
+        description="ChatFleet — multi-RAG chatbot platform",
         openapi_url="/api/openapi.json",
         default_response_class=UTF8JSONResponse,
     )

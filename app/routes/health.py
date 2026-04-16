@@ -16,7 +16,7 @@ router = APIRouter(prefix="/health", tags=["Health"])
 
 
 @router.get("")
-async def health() -> dict[str, str | bool]:
+async def health() -> dict[str, str | bool | dict[str, str]]:
     # Check Mongo connectivity
     try:
         db = get_database()
@@ -35,5 +35,8 @@ async def health() -> dict[str, str | bool]:
         "mongo": mongo_ok,
         "index_dir": index_ok,
         "upload_dir": upload_ok,
+        "build": {
+            "version": settings.build_version,
+            "commit": settings.build_commit,
+        },
     }
-

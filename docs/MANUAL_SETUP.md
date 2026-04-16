@@ -1,4 +1,24 @@
-# ChatFleet — Manual Backend + Frontend Setup (No Docker)
+# ChatFleet — Setup Options
+
+## Easiest: one-line Docker install
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/ChatFleetOSS/chatfleet-api/main/install.sh | bash
+```
+
+What it does:
+- Writes a stack config to `~/.chatfleet/compose.yaml` and `.env` (customize ports, image tags, JWT secret, models, etc.).
+- Runs `docker compose pull && docker compose up -d` for MongoDB 6, `ghcr.io/chatfleetoss/chatfleet-api`, and `ghcr.io/chatfleetoss/chatfleet-web`.
+- Exposes: API on `http://localhost:8000` and Web on `http://localhost:3000` (change via `CHATFLEET_API_PORT` / `CHATFLEET_WEB_PORT` in `~/.chatfleet/.env`).
+
+Stop or restart later:
+```bash
+cd ~/.chatfleet
+docker compose down    # stop
+docker compose up -d   # start
+```
+
+## Manual Backend + Frontend Setup (No Docker)
 
 Run the API, Mongo, and Web UI locally without Compose or the installer.
 

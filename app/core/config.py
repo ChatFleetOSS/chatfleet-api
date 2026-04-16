@@ -36,6 +36,8 @@ class Settings(BaseModel):
     top_k_default: int = Field(alias="TOP_K_DEFAULT")
     temperature_default: float = Field(alias="TEMPERATURE_DEFAULT")
     cors_origins: List[str] = Field(alias="CORS_ORIGINS")
+    build_version: str = Field(alias="CHATFLEET_BUILD_VERSION")
+    build_commit: str = Field(alias="CHATFLEET_BUILD_COMMIT")
 
     @field_validator("cors_origins", mode="before")
     @classmethod
@@ -101,6 +103,8 @@ def load_settings() -> Settings:
         "TOP_K_DEFAULT": "12",
         "TEMPERATURE_DEFAULT": "0.2",
         "CORS_ORIGINS": "http://localhost:3000",
+        "CHATFLEET_BUILD_VERSION": "dev",
+        "CHATFLEET_BUILD_COMMIT": "local",
     }
     for key, fallback in required.items():
         merged.setdefault(key, fallback)

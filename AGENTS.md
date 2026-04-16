@@ -16,6 +16,7 @@ This backend powers ChatFleet’s multi-RAG services with FastAPI and contract t
 - `npm run pact:consumer` exercises consumer contracts under `tests/contract/consumer`.
 - `npm run pact:provider` verifies the provider implementation via `ts-node`.
 - `npm run pact:all` chains both contract stages for pre-merge validation.
+- One-line Docker install for a full stack: `curl -fsSL https://raw.githubusercontent.com/ChatFleetOSS/chatfleet-api/main/install.sh | bash` (writes config to `~/.chatfleet`, runs compose with Mongo, API, and Web).
 
 ## Coding Style & Naming Conventions
 - Python code is formatted with `black` (line length 88) and should stay fully type-hinted.
