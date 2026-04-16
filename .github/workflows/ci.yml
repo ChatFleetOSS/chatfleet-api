@@ -236,6 +236,9 @@ jobs:
       - name: Install Pact deps
         run: npm ci --no-audit --no-fund
 
+      - name: Generate Pact files
+        run: npm run pact:consumer
+
       - name: Boot API and wait for health
         env:
           MONGO_URI: mongodb://localhost:27017/chatfleet
