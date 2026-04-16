@@ -10,14 +10,14 @@ const provider = new PactV3({
   logLevel: "debug",
 });
 
-describe("Pact — /admin/rag/delete", () => {
+describe("Pact — /rag/delete", () => {
   it("deletes a RAG when confirmation matches", async () => {
     provider
       .given("RAG 'policies' exists and caller is admin")
       .uponReceiving("a delete RAG request")
       .withRequest({
         method: "POST",
-        path: "/api/admin/rag/delete",
+        path: "/api/rag/delete",
         headers: {
           Authorization: M.regex(/^Bearer .+/, "Bearer token"),
           "Content-Type": "application/json",
@@ -44,7 +44,7 @@ describe("Pact — /admin/rag/delete", () => {
           confirmation: "policies",
         };
 
-        const res = await fetch(`${mockServer.url}/api/admin/rag/delete`, {
+        const res = await fetch(`${mockServer.url}/api/rag/delete`, {
           method: "POST",
           headers: {
             Authorization: "Bearer token",

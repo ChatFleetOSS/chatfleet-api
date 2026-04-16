@@ -40,7 +40,7 @@ describe("Pact — /rag/upload", () => {
         body: {
           job_id: M.uuid(),
           accepted: M.eachLike("handbook.pdf"),
-          skipped: M.eachLike("duplicate.pdf"),
+          skipped: M.constrainedArrayLike("duplicate.pdf", 0, 20, 1),
           rag_slug: "policies",
           corr_id: M.uuid(),
         },

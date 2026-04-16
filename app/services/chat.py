@@ -7,9 +7,11 @@ from __future__ import annotations
 
 import asyncio
 import json
-import re
 import logging
+import os
+import re
 from typing import Any, AsyncGenerator, Dict, List, Sequence, Tuple
+from uuid import uuid4
 
 from fastapi import status
 
@@ -443,6 +445,24 @@ async def _ensure_llm_configured() -> bool:
 
 
 async def handle_chat(request: ChatRequest, user_id: str) -> ChatResponse:
+    # Used only by provider verification so CI does not depend on an external LLM.
+    if os.getenv("CHATFLEET_FAKE_CHAT_MODE") == "1":
+        return ChatResponse(
+            answer="Our parental leave policy...",
+            citations=[
+                Citation(
+                    doc_id=str(uuid4()),
+                    filename="parental_policy.pdf",
+                    pages=[4],
+                    snippet="Eligible employees...",
+                )
+            ],
+            usage=Usage(
+                tokens_in=sum(len(msg.content) for msg in request.messages),
+                tokens_out=50,
+            ),
+            corr_id=get_corr_id(),
+        )
     if not await _ensure_llm_configured():
         raise_http_error(
             "LLM_NOT_CONFIGURED",

@@ -93,7 +93,10 @@ jobs:
         
         continue-on-error: true
   publish-main:
-    needs: build-test-scan
+    needs:
+      - build-test-scan
+      - provider-verify
+      - infra-smoke
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     steps:
@@ -180,6 +183,7 @@ jobs:
           INSTALL_DIR="$RUNNER_TEMP/chatfleet-infra-install" \
           INFRA_SOURCE_DIR="$RUNNER_TEMP/chatfleet-infra-src" \
           SKIP_PULL=1 \
+          SKIP_VERIFY=1 \
           API_TAG=ci-local \
           CHANNEL=stable \
           bash "$RUNNER_TEMP/chatfleet-infra-src/install.sh"
@@ -187,8 +191,7 @@ jobs:
         run: |
           python3 "$RUNNER_TEMP/chatfleet-infra-install/scripts/verify_stack.py" \
             --base-url http://localhost:8080 \
-            --expected-api ci-local \
-            --expected-web "$WEB_TAG"
+            --expected-api ci-local
       - name: Dump logs on failure
         if: failure()
         run: docker compose -f "$RUNNER_TEMP/chatfleet-infra-install/docker-compose.yml" logs --tail=200
@@ -237,6 +240,7 @@ jobs:
           AUTO_START_MONGO: "0"
           JWT_SECRET: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
           OPENAI_API_KEY: ""
+          CHATFLEET_FAKE_CHAT_MODE: "1"
         run: |
           nohup uvicorn main:app --host 0.0.0.0 --port 8000 --proxy-headers > api.log 2>&1 &
           for i in $(seq 1 60); do

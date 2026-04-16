@@ -1,5 +1,6 @@
 // generated-by: codex-agent 2025-02-17T13:30:00Z
 import { Verifier } from "@pact-foundation/pact";
+import fs from "fs";
 import path from "path";
 import { execFile } from "child_process";
 import { promisify } from "util";
@@ -18,6 +19,16 @@ const tokens = {
   user: null,
 };
 
+function applyBearer(req, token) {
+  if (!token) {
+    return;
+  }
+  req.setHeader?.("Authorization", `Bearer ${token}`);
+  req.setHeader?.("authorization", `Bearer ${token}`);
+  req.headers["Authorization"] = `Bearer ${token}`;
+  req.headers["authorization"] = `Bearer ${token}`;
+}
+
 async function httpFetch(input, init) {
   if (typeof fetch === "function") {
     return fetch(input, init);
@@ -27,7 +38,8 @@ async function httpFetch(input, init) {
 }
 
 async function seedAdminUser() {
-  const pythonBin = process.env.PYTHON ?? "python3";
+  const venvPython = path.join(repoRoot, ".venv", "bin", "python");
+  const pythonBin = process.env.PYTHON ?? (fs.existsSync(venvPython) ? venvPython : "python3");
   try {
     await execFileAsync(pythonBin, ["scripts/seed_admin.py"], {
       env: {
@@ -154,18 +166,15 @@ async function main() {
       },
     },
     requestFilter: (req, _res, next) => {
-      const pathLower = (req.path ?? "").toLowerCase();
+      const pathLower = String(req.path || req.url || "").toLowerCase();
       if (pathLower.includes("/api/rag/upload") && tokens.admin) {
-        req.setHeader?.("Authorization", `Bearer ${tokens.admin}`);
-        req.headers["Authorization"] = `Bearer ${tokens.admin}`;
+        applyBearer(req, tokens.admin);
       }
-      if (pathLower.includes("/api/admin/rag/delete") && tokens.admin) {
-        req.setHeader?.("Authorization", `Bearer ${tokens.admin}`);
-        req.headers["Authorization"] = `Bearer ${tokens.admin}`;
+      if (pathLower.includes("/api/rag/delete") && tokens.admin) {
+        applyBearer(req, tokens.admin);
       }
       if (pathLower.includes("/api/chat") && tokens.user) {
-        req.setHeader?.("Authorization", `Bearer ${tokens.user}`);
-        req.headers["Authorization"] = `Bearer ${tokens.user}`;
+        applyBearer(req, tokens.user);
       }
       next();
     },
