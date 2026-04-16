@@ -77,6 +77,13 @@ async function seedAdminUser() {
       });
       return;
     }
+    console.error(`✖ seed_admin.py failed via ${pythonBin}`);
+    if (error.stdout) {
+      console.error(String(error.stdout).trim());
+    }
+    if (error.stderr) {
+      console.error(String(error.stderr).trim());
+    }
     throw error;
   }
 }

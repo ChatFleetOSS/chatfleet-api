@@ -255,11 +255,31 @@ jobs:
           python scripts/ci_smoke.py --base http://127.0.0.1:8000/api
 
       - name: Verify provider pact
+        id: provider_verify
         env:
           PROVIDER_BASE_URL: http://127.0.0.1:8000
+        continue-on-error: true
         run: |
           set -o pipefail
           npm run pact:provider 2>&1 | tee provider-verify.log
+
+      - name: Surface provider verifier failure
+        if: steps.provider_verify.outcome == 'failure'
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          log_path = Path("provider-verify.log")
+          if not log_path.exists():
+              print("::error title=Provider Verify::provider-verify.log is missing")
+              raise SystemExit(1)
+
+          lines = log_path.read_text(errors="replace").splitlines()
+          tail = "\n".join(lines[-60:]).strip() or "provider-verify.log was empty"
+          summary = tail.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+          print(f"::error title=Provider Verify::{summary[:7000]}")
+          raise SystemExit(1)
+          PY
 
       - name: Upload API log on failure
         if: failure()
