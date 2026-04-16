@@ -12,7 +12,7 @@ from bson import ObjectId
 from motor.motor_asyncio import AsyncIOMotorCollection
 from passlib.context import CryptContext
 
-from app.models.auth import AdminCreateUserRequest, RegisterRequest, UserPublic, UserRole
+from app.models.auth import AdminCreateUserRequest, RegisterRequest, UserPublic
 
 pwd_context = CryptContext(schemes=["bcrypt_sha256", "bcrypt"], deprecated="auto")
 

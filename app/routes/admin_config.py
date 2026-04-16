@@ -7,7 +7,6 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Depends
 
-from app.core.config import settings
 from app.dependencies.auth import require_admin
 from app.models.admin import AdminConfigResponse
 from app.utils.responses import with_corr_id

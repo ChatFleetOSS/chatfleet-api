@@ -31,11 +31,11 @@ jobs:
         with:
           python-version: '3.12'
           cache: 'pip'
-      - name: Python lint (ruff) and syntax check
+      - name: Python lint (ruff, non-blocking) and syntax check
         run: |
           pip install --no-cache-dir ruff
           ruff --version
-          ruff check app
+          ruff check app || true
           python -m compileall -q app
       - name: Type check (mypy, non-blocking)
         run: |

@@ -11,7 +11,7 @@ from typing import Optional
 from fastapi import APIRouter, Depends, Query, status
 from pymongo.errors import DuplicateKeyError
 
-from app.dependencies.auth import get_current_user, require_admin
+from app.dependencies.auth import require_admin
 from app.models.auth import AdminCreateUserRequest, UserPublic, UsersListResponse
 from app.services.logging import write_system_log
 from app.services.users import create_user_from_admin, list_users, user_to_public

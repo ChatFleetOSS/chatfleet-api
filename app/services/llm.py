@@ -109,7 +109,7 @@ async def generate_chat_completion(
                 return models[0].id
             model_name = await loop.run_in_executor(None, _pick_model)
         return await loop.run_in_executor(None, partial(_call, model_name))
-    except Exception as exc:
+    except Exception:
         try:
             cfg = await get_llm_config()
             logger.exception(

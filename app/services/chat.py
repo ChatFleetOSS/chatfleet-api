@@ -13,7 +13,6 @@ from typing import Any, AsyncGenerator, Dict, List, Sequence, Tuple
 
 from fastapi import status
 
-from app.core.config import settings
 from app.core.corr_id import get_corr_id
 from app.models.chat import ChatRequest, ChatResponse, Citation, Usage
 from app.services.embeddings import embed_text

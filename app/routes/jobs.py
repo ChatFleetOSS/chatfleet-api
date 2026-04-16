@@ -8,7 +8,6 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, Path, status
 
 from app.dependencies.auth import get_current_user
-from app.models.envelope import ErrorEnvelope
 from app.models.jobs import JobStatusResponse
 from app.services.jobs import job_manager
 from app.utils.responses import raise_http_error

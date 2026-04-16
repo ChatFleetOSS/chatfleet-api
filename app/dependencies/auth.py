@@ -9,18 +9,15 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Dict
 
 import jwt
-from bson import ObjectId
-from fastapi import Depends, HTTPException, status
+from fastapi import Depends, status
 from fastapi.security import OAuth2PasswordBearer
 from pydantic import BaseModel
 
 from app.core.config import settings
 from app.core.corr_id import get_corr_id
-from app.models.auth import UserPublic
 from app.services.users import (
     find_user_by_email,
     find_user_by_id,
-    hash_password,
     verify_password,
 )
 from app.utils.responses import raise_http_error

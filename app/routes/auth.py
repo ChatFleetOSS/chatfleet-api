@@ -13,7 +13,6 @@ from app.models.auth import AuthResponse, LoginRequest, RegisterRequest, UserPub
 from app.services.users import create_user_from_register, user_to_public, find_user_by_email
 from app.services.promotions import apply_if_pending
 from app.utils.responses import raise_http_error, with_corr_id
-from app.utils.responses import with_corr_id
 
 router = APIRouter(prefix="/auth", tags=["Auth"])
 
