@@ -31,8 +31,6 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Capture Python executable
-        run: echo "PYTHON_BIN=$(python -c 'import sys; print(sys.executable)')" >> "$GITHUB_ENV"
       - name: Python lint (ruff, non-blocking) and syntax check
         run: |
           pip install --no-cache-dir ruff
@@ -221,8 +219,8 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Capture Python executable
-        run: echo "PYTHON_BIN=$(python -c 'import sys; print(sys.executable)')" >> "$GITHUB_ENV"
+      - name: Export Python executable for Pact helpers
+        run: echo "PYTHON=$(python -c 'import sys; print(sys.executable)')" >> "$GITHUB_ENV"
 
       - name: Install API deps
         working-directory: .
@@ -257,8 +255,6 @@ jobs:
           python scripts/ci_smoke.py --base http://localhost:8000/api
 
       - name: Verify provider pact
-        env:
-          PYTHON: ${{ env.PYTHON_BIN }}
         run: npm run pact:provider
 
       - name: Upload API log on failure
