@@ -30,7 +30,6 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-          cache: 'pip'
       - name: Python lint (ruff, non-blocking) and syntax check
         run: |
           pip install --no-cache-dir ruff
@@ -218,7 +217,6 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-          cache: 'pip'
 
       - name: Install API deps
         working-directory: .

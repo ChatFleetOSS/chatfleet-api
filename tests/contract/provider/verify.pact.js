@@ -38,8 +38,20 @@ async function httpFetch(input, init) {
 }
 
 async function seedAdminUser() {
+  const setupPython = process.env.pythonLocation
+    ? path.join(
+        process.env.pythonLocation,
+        process.platform === "win32" ? "python.exe" : "bin/python"
+      )
+    : null;
   const venvPython = path.join(repoRoot, ".venv", "bin", "python");
-  const pythonBin = process.env.PYTHON ?? (fs.existsSync(venvPython) ? venvPython : "python3");
+  const pythonBin =
+    process.env.PYTHON ??
+    (setupPython && fs.existsSync(setupPython)
+      ? setupPython
+      : fs.existsSync(venvPython)
+        ? venvPython
+        : "python3");
   try {
     await execFileAsync(pythonBin, ["scripts/seed_admin.py"], {
       env: {
