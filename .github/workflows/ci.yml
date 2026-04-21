@@ -66,9 +66,12 @@ jobs:
         run: trivy image --severity HIGH,CRITICAL --ignore-unfixed --no-progress "${{ env.LOCAL_IMAGE_TAG }}"
         continue-on-error: true
       - name: Gitleaks
-        uses: gitleaks/gitleaks-action@ff98106e4c7b2bc287b24eaf42907196329070c7
-        with:
-          args: "detect --no-banner --exit-code 1"
+        run: |
+          docker run --rm \
+            -v "$PWD:/repo" \
+            -w /repo \
+            zricethezav/gitleaks:latest \
+            detect --source . --no-banner --redact --exit-code 1
         continue-on-error: true
       - name: SBOM
         uses: anchore/sbom-action@a930d0ac434e3182448fe678398ba5713717112a
