@@ -28,12 +28,26 @@ def main() -> int:
         print(message, file=sys.stderr)
         return proc.returncode or 1
 
-    data = json.loads(proc.stdout)
+    try:
+        data = json.loads(proc.stdout)
+    except json.JSONDecodeError as exc:
+        message = f"unable to parse docker image inspect output for {args.image}: {exc}"
+        emit_github_annotation("error", message)
+        print(message, file=sys.stderr)
+        return 1
     if not data:
         print(f"No image metadata returned for {args.image}", file=sys.stderr)
         return 1
 
-    size_bytes = int(data[0]["Size"])
+    image_meta = data[0]
+    if "Size" not in image_meta:
+        available_keys = ", ".join(sorted(image_meta.keys()))
+        message = f"'Size' missing from docker image inspect output for {args.image}. Keys: {available_keys}"
+        emit_github_annotation("error", message)
+        print(message, file=sys.stderr)
+        return 1
+
+    size_bytes = int(image_meta["Size"])
     size_mb = size_bytes / (1024 * 1024)
     message = f"[image-size] {args.image} -> {size_mb:.1f} MB"
     emit_github_annotation("notice", message)
