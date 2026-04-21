@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import gzip
 import json
 import subprocess
 import sys
@@ -10,10 +11,49 @@ def emit_github_annotation(level: str, message: str) -> None:
     print(f"::{level}::{message}")
 
 
+class CountingWriter:
+    def __init__(self) -> None:
+        self.count = 0
+
+    def write(self, data: bytes) -> int:
+        self.count += len(data)
+        return len(data)
+
+    def flush(self) -> None:
+        return None
+
+
+def compute_compressed_export_size(image_ref: str) -> tuple[int | None, str | None]:
+    proc = subprocess.Popen(
+        ["docker", "save", image_ref],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+
+    if proc.stdout is None or proc.stderr is None:
+        proc.kill()
+        return None, "failed to open docker save pipes"
+
+    counter = CountingWriter()
+    try:
+        with gzip.GzipFile(fileobj=counter, mode="wb", compresslevel=1) as gz_file:
+            for chunk in iter(lambda: proc.stdout.read(1024 * 1024), b""):
+                gz_file.write(chunk)
+    finally:
+        proc.stdout.close()
+
+    stderr = proc.stderr.read().decode("utf-8", errors="replace").strip()
+    returncode = proc.wait()
+    if returncode != 0:
+        return None, stderr or f"docker save failed for {image_ref}"
+
+    return counter.count, None
+
+
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Fail when a local Docker image is too large.")
+    parser = argparse.ArgumentParser(description="Fail when a local Docker image export is too large.")
     parser.add_argument("--image", required=True, help="Local Docker image reference")
-    parser.add_argument("--max-mb", type=float, required=True, help="Maximum uncompressed image size in MB")
+    parser.add_argument("--max-mb", type=float, required=True, help="Maximum compressed docker-save size in MB")
     args = parser.parse_args()
 
     proc = subprocess.run(
@@ -30,26 +70,23 @@ def main() -> int:
 
     try:
         data = json.loads(proc.stdout)
-    except json.JSONDecodeError as exc:
-        message = f"unable to parse docker image inspect output for {args.image}: {exc}"
-        emit_github_annotation("error", message)
-        print(message, file=sys.stderr)
-        return 1
+    except json.JSONDecodeError:
+        data = None
     if not data:
-        print(f"No image metadata returned for {args.image}", file=sys.stderr)
-        return 1
-
-    image_meta = data[0]
-    if "Size" not in image_meta:
-        available_keys = ", ".join(sorted(image_meta.keys()))
-        message = f"'Size' missing from docker image inspect output for {args.image}. Keys: {available_keys}"
+        message = f"No image metadata returned for {args.image}"
         emit_github_annotation("error", message)
         print(message, file=sys.stderr)
         return 1
 
-    size_bytes = int(image_meta["Size"])
+    size_bytes, export_error = compute_compressed_export_size(args.image)
+    if export_error is not None or size_bytes is None:
+        message = export_error or f"unable to compute compressed export size for {args.image}"
+        emit_github_annotation("error", message)
+        print(message, file=sys.stderr)
+        return 1
+
     size_mb = size_bytes / (1024 * 1024)
-    message = f"[image-size] {args.image} -> {size_mb:.1f} MB"
+    message = f"[image-size] {args.image} compressed export -> {size_mb:.1f} MB"
     emit_github_annotation("notice", message)
     print(message)
 
