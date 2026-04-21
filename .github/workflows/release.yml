@@ -60,6 +60,8 @@ jobs:
             ${{ steps.meta.outputs.tags }}
             ghcr.io/chatfleetoss/chatfleet-api:latest
           labels: ${{ steps.meta.outputs.labels }}
+      - name: Enforce published image size budget
+        run: python3 scripts/check_ghcr_image_size.py --image-ref ghcr.io/chatfleetoss/chatfleet-api:${{ github.ref_name }} --max-compressed-mb 700
       - name: Install Cosign
         uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac
       - name: Cosign sign (keyless)

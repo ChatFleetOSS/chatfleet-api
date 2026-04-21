@@ -1,0 +1,3 @@
+# Force CPU-only torch wheels on Linux so Docker images and CI do not pull GPU runtimes.
+torch==2.6.0+cpu ; platform_system == "Linux"
+

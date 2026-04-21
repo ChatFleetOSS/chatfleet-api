@@ -1,8 +1,7 @@
-# syntax=docker/dockerfile:1.7
-
 FROM python:3.12-slim-bullseye AS base
 ENV PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1
+    PYTHONUNBUFFERED=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
 ARG BUILD_VERSION=dev
 ARG BUILD_COMMIT=local
 ENV CHATFLEET_BUILD_VERSION=${BUILD_VERSION} \
@@ -19,8 +18,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
-COPY requirements.txt ./
-RUN pip install --no-cache-dir -r requirements.txt
+COPY requirements.txt constraints-linux-cpu.txt ./
+COPY scripts/install_python_deps.sh ./scripts/install_python_deps.sh
+RUN chmod +x ./scripts/install_python_deps.sh && \
+    PIP_BIN=pip PYTHON_BIN=python ./scripts/install_python_deps.sh
 COPY . .
 
 # Create required dirs and set permissions

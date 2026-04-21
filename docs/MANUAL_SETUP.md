@@ -40,8 +40,10 @@ cd chatfleet-api
 python3 -m venv .venv
 source .venv/bin/activate
 pip install --upgrade pip
-pip install -r requirements.txt
+./scripts/install_python_deps.sh
 ```
+
+Sur Linux, ce script force une variante CPU-only de `torch` pour eviter d'installer les runtimes GPU inutiles.
 
 Set env vars (example: local LLM; adjust paths/models as needed):
 ```bash

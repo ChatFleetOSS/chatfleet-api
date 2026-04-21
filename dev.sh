@@ -76,7 +76,7 @@ else
   # shellcheck disable=SC1091
   source "$SCRIPT_DIR/.venv/bin/activate"
   pip install --upgrade pip >/dev/null
-  pip install -r "$SCRIPT_DIR/requirements.txt"
+  PIP_BIN=pip PYTHON_BIN=python "$SCRIPT_DIR/scripts/install_python_deps.sh"
 fi
 
 if ! command -v uvicorn >/dev/null 2>&1; then
@@ -86,4 +86,3 @@ fi
 PORT="${PORT:-8000}"
 note "Starting uvicorn on :$PORT (reload)"
 exec uvicorn main:app --reload --port "$PORT"
-

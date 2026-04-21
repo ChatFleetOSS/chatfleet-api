@@ -75,6 +75,8 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
       - name: Set IMAGE_TAG env
         run: echo "IMAGE_TAG=${{ fromJSON(steps.meta.outputs.json).tags[0] }}" >> $GITHUB_ENV
+      - name: Enforce local image size budget
+        run: python3 scripts/check_local_image_size.py --image "$IMAGE_TAG" --max-mb 700
       - name: Install Trivy
         uses: aquasecurity/setup-trivy@ff1b8b060f23b650436d419b5e13f67f5d4c3087
       - name: Trivy scan
@@ -143,6 +145,8 @@ jobs:
           tags: |
             ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+      - name: Enforce published image size budget
+        run: python3 scripts/check_ghcr_image_size.py --image-ref ghcr.io/chatfleetoss/chatfleet-api:edge --max-compressed-mb 700
       - name: Install Cosign
         uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac
       - name: Cosign sign (keyless)
@@ -225,7 +229,7 @@ jobs:
       - name: Install API deps
         working-directory: .
         run: |
-          pip install --no-cache-dir -r requirements.txt
+          bash scripts/install_python_deps.sh
 
       - name: Set up Node
         uses: actions/setup-node@v4
