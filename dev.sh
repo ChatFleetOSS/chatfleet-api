@@ -85,4 +85,5 @@ fi
 
 PORT="${PORT:-8000}"
 note "Starting uvicorn on :$PORT (reload)"
-exec uvicorn main:app --reload --port "$PORT"
+cd "$SCRIPT_DIR"
+exec uvicorn main:app --reload --reload-dir "$SCRIPT_DIR" --port "$PORT"

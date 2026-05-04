@@ -39,7 +39,7 @@ def verify_password(password: str, hash_: str) -> bool:
 
 def user_to_public(doc: Dict[str, Any]) -> UserPublic:
     return UserPublic(
-        id=str(doc["_id"]),
+        _id=str(doc["_id"]),
         email=doc["email"],
         name=doc["name"],
         role=doc.get("role", "user"),

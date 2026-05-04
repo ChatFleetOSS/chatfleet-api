@@ -98,23 +98,24 @@ Notes:
     "corr_id": "..."
   }
   ```
-- **Side effects:** Creates an empty RAG document with no users or files and logs `rag.create`. Follow with `/api/rag/users/add` to grant access and `/api/rag/upload` to ingest PDFs, DOCX, ODT, or TXT files.
+- **Side effects:** Creates an empty RAG document with no users or files and logs `rag.create`. Follow with `/api/rag/users/add` to grant access and `/api/rag/upload` to ingest PDF, DOCX, ODT, ODS, ODP, or TXT files.
 
 ### `POST /api/rag/upload`
 - **Access:** Admin.
 - **Content-Type:** `multipart/form-data` with fields:
   - `rag_slug`: string
-  - `files`: one or more PDF/DOCX/ODT/TXT uploads
+  - `files`: one or more PDF/DOCX/ODT/ODS/ODP/TXT uploads
   - `splitter_opts` (optional JSON string; reserved for custom chunking)
 - **Response 202:** 
   ```json
-  {"job_id": "...", "accepted": ["handbook.pdf"], "skipped": [], "rag_slug": "hr-docs", "corr_id": "..."}
+  {"job_id": "...", "accepted": ["handbook.pdf", "metrics.ods"], "skipped": [], "rag_slug": "hr-docs", "corr_id": "..."}
   ```
 - **Follow-up:** Poll `/api/jobs/{job_id}` until status is `done`. When complete, `/api/rag/docs` reflects the new documents.
 
 ### `GET /api/rag/docs?rag_slug=<slug>`
 - **Access:** Admin.
 - **Response:** Metadata for every stored document, including status (`uploaded`, `chunking`, `chunked`, `indexing`, `indexed`, `error`), `size_bytes`, `chunk_count`, and timestamps.
+- **Document MIME values:** `application/pdf`, `application/vnd.openxmlformats-officedocument.wordprocessingml.document`, `application/vnd.oasis.opendocument.text`, `application/vnd.oasis.opendocument.spreadsheet`, `application/vnd.oasis.opendocument.presentation`, `text/plain`, `application/msword`.
 
 ### `GET /api/rag/index/status?rag_slug=<slug>`
 - **Access:** Admin.
@@ -233,7 +234,7 @@ Notes:
 
 ## Frontend Workflows
 1. **User onboarding:** Call `/api/auth/register` or have an admin create the user, then assign RAG access via `/api/rag/users/add`.
-2. **Creating a RAG:** Call `POST /api/rag`, assign users, upload PDFs/DOCX/ODT/TXT with `/api/rag/upload`, watch the job via `/api/jobs/{job_id}`, and display `GET /api/rag/index/status` for progress.
+2. **Creating a RAG:** Call `POST /api/rag`, assign users, upload PDF/DOCX/ODT/ODS/ODP/TXT files with `/api/rag/upload`, watch the job via `/api/jobs/{job_id}`, and display `GET /api/rag/index/status` for progress.
 3. **Updating RAG content:** For new docs, reuse `/api/rag/upload`. For reindexing after bulk changes, trigger `/api/rag/rebuild`.
 4. **Resetting or deleting:** Use `/api/rag/reset` to purge documents; follow up with manual Mongo deletion if the slug should disappear entirely.
 5. **Chat UI:** Determine available slugs via `/api/rag/list`, start streaming chats with `/api/chat/stream`, and surface citations/corr_id in telemetry logs.

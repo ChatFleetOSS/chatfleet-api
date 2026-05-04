@@ -11,6 +11,7 @@ import hashlib
 import chardet
 import json
 import re
+import zipfile
 import numpy as np
 from datetime import datetime, timezone
 from pathlib import Path
@@ -24,7 +25,8 @@ from PyPDF2 import PdfReader
 from docx import Document as DocxDocument
 from odf.opendocument import load as load_odt
 from odf import teletype
-from odf.text import P as OdtParagraph
+from odf.draw import Page as OdpSlide
+from odf.text import H as OdfHeading, P as OdtParagraph
 from odf.table import Table as OdtTable, TableRow as OdtTableRow, TableCell as OdtTableCell
 from pymongo.errors import DuplicateKeyError
 
@@ -42,6 +44,7 @@ from app.models.rag import (
     RagUsersResponse,
 )
 from app.models.jobs import JobProgressTotals
+from app.models.jobs import JobPhase
 from app.services.chunker import ChunkWithPage, PageText, chunk_pdf
 from app.services.embeddings import embed_texts
 from app.services.jobs import JobRecord, job_manager
@@ -82,6 +85,14 @@ ALLOWED_EXTENSIONS = {
     ".txt": "text/plain",
     ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
     ".odt": "application/vnd.oasis.opendocument.text",
+    ".ods": "application/vnd.oasis.opendocument.spreadsheet",
+    ".odp": "application/vnd.oasis.opendocument.presentation",
+}
+
+OPEN_DOCUMENT_MIME_TYPES = {
+    ".odt": "application/vnd.oasis.opendocument.text",
+    ".ods": "application/vnd.oasis.opendocument.spreadsheet",
+    ".odp": "application/vnd.oasis.opendocument.presentation",
 }
 
 
@@ -113,6 +124,68 @@ def _doc_to_rag_doc(entry: Dict[str, Any]) -> RagDoc:
         uploaded_at=entry.get("uploaded_at"),
         indexed_at=entry.get("indexed_at"),
     )
+
+
+def _clean_extracted_text(text: str) -> str:
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    text = re.sub(r"[ \t]+", " ", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
+
+
+def _validate_open_document_package(path: Path, extension: str) -> None:
+    expected_mime = OPEN_DOCUMENT_MIME_TYPES.get(extension)
+    if expected_mime is None:
+        return
+
+    try:
+        with zipfile.ZipFile(path) as archive:
+            names = set(archive.namelist())
+            if "mimetype" not in names:
+                raise ValueError("OpenDocument file is missing internal mimetype")
+            if "content.xml" not in names:
+                raise ValueError("OpenDocument file is missing content.xml")
+            if "META-INF/manifest.xml" not in names:
+                raise ValueError("OpenDocument file is missing manifest")
+
+            internal_mime = archive.read("mimetype").decode("ascii", errors="strict").strip()
+            if internal_mime != expected_mime:
+                raise ValueError(
+                    f"OpenDocument mimetype mismatch: expected {expected_mime}, got {internal_mime or 'empty'}"
+                )
+
+            corrupt_member = archive.testzip()
+            if corrupt_member:
+                raise ValueError(f"OpenDocument ZIP member is corrupt: {corrupt_member}")
+    except zipfile.BadZipFile as exc:
+        raise ValueError("Invalid OpenDocument ZIP container") from exc
+    except UnicodeDecodeError as exc:
+        raise ValueError("OpenDocument internal mimetype is not valid ASCII") from exc
+
+
+def _extract_cell_text(cell: OdtTableCell) -> str:
+    text = _clean_extracted_text(teletype.extractText(cell))
+    if text:
+        return text
+    for attr in ("value", "datevalue", "timevalue", "booleanvalue", "currency"):
+        value = cell.getAttribute(attr)
+        if value not in (None, ""):
+            return str(value).strip()
+    return ""
+
+
+def _row_cells_text(row: OdtTableRow) -> List[str]:
+    cells: List[str] = []
+    for cell in row.getElementsByType(OdtTableCell):
+        text = _extract_cell_text(cell)
+        repeat = cell.getAttribute("numbercolumnsrepeated")
+        try:
+            repeat_count = max(1, min(int(repeat or 1), 32))
+        except (TypeError, ValueError):
+            repeat_count = 1
+        if text:
+            cells.extend([text] * repeat_count)
+    return cells
 
 
 async def _extract_pdf_text(path: str) -> List[PageText]:
@@ -197,18 +270,14 @@ async def _extract_odt_text(path: str) -> List[PageText]:
         page = 1
 
         for para in doc.getElementsByType(OdtParagraph):
-            text = teletype.extractText(para).strip()
+            text = _clean_extracted_text(teletype.extractText(para))
             if text:
                 pages.append(PageText(page=page, text=text))
                 page += 1
 
         for table in doc.getElementsByType(OdtTable):
             for row in table.getElementsByType(OdtTableRow):
-                cells = [
-                    teletype.extractText(cell).strip()
-                    for cell in row.getElementsByType(OdtTableCell)
-                    if teletype.extractText(cell).strip()
-                ]
+                cells = _row_cells_text(row)
                 if cells:
                     pages.append(PageText(page=page, text=" | ".join(cells)))
                     page += 1
@@ -221,10 +290,70 @@ async def _extract_odt_text(path: str) -> List[PageText]:
     return pages
 
 
+async def _extract_ods_text(path: str) -> List[PageText]:
+    def _read() -> List[PageText]:
+        doc = load_odt(path)
+        pages: List[PageText] = []
+        for sheet_index, sheet in enumerate(doc.getElementsByType(OdtTable), start=1):
+            sheet_name = sheet.getAttribute("name") or f"Sheet {sheet_index}"
+            row_number = 0
+            for row in sheet.getElementsByType(OdtTableRow):
+                repeat = row.getAttribute("numberrowsrepeated")
+                try:
+                    repeat_count = max(1, min(int(repeat or 1), 32))
+                except (TypeError, ValueError):
+                    repeat_count = 1
+                cells = _row_cells_text(row)
+                if cells:
+                    for _ in range(repeat_count):
+                        row_number += 1
+                        pages.append(
+                            PageText(
+                                page=sheet_index,
+                                text=f"{sheet_name} row {row_number}: {' | '.join(cells)}",
+                            )
+                        )
+                else:
+                    row_number += repeat_count
+        return pages
+
+    pages = await asyncio.to_thread(_read)
+    if not pages:
+        raise ValueError("No extractable text found in ODS")
+    return pages
+
+
+async def _extract_odp_text(path: str) -> List[PageText]:
+    def _read() -> List[PageText]:
+        doc = load_odt(path)
+        pages: List[PageText] = []
+        for slide_index, slide in enumerate(doc.getElementsByType(OdpSlide), start=1):
+            slide_name = slide.getAttribute("name") or f"Slide {slide_index}"
+            text_blocks: List[str] = []
+            for node_type in (OdfHeading, OdtParagraph):
+                for node in slide.getElementsByType(node_type):
+                    text = _clean_extracted_text(teletype.extractText(node))
+                    if text:
+                        text_blocks.append(text)
+            if text_blocks:
+                pages.append(
+                    PageText(
+                        page=slide_index,
+                        text=f"{slide_name}\n" + "\n".join(text_blocks),
+                    )
+                )
+        return pages
+
+    pages = await asyncio.to_thread(_read)
+    if not pages:
+        raise ValueError("No extractable text found in ODP")
+    return pages
+
+
 async def _extract_txt_text(path: str) -> List[PageText]:
     def _read() -> List[PageText]:
         raw = Path(path).read_bytes()
-        detected = chardet.detect(raw) if raw else {}
+        detected: Dict[str, Any] = dict(chardet.detect(raw)) if raw else {}
         encoding = (detected.get("encoding") or "utf-8").lower()
         text = raw.decode(encoding, errors="replace")
         text = text.replace("\r\n", "\n").replace("\r", "\n").strip()
@@ -571,7 +700,7 @@ async def _select_windows(records: List[ChunkRecord]) -> List[Tuple[str, List[st
 
 async def _generate_rag_suggestions(
     rag_slug: str, name: str, description: str
-) -> tuple[List[str], List[str], str, Optional[str]]:
+) -> tuple[List[str], List[str], str, Optional[str], bool]:
     # load records
     try:
         _, records = load_index(rag_slug)
@@ -666,8 +795,8 @@ async def _generate_rag_suggestions(
         if llm_result is None:
             return []
         raw, _ = llm_result
-        lines = [l.strip() for l in raw.splitlines() if l.strip()]
-        cleaned = [_clean_question(l) for l in lines]
+        lines = [line.strip() for line in raw.splitlines() if line.strip()]
+        cleaned = [_clean_question(line) for line in lines]
         cleaned = [c for c in cleaned if c]
         if len(cleaned) >= len(questions):
             return cleaned[: len(questions)]
@@ -1022,6 +1151,14 @@ async def _persist_file(rag_slug: str, upload: UploadFile, doc_id: str, extensio
             hasher.update(chunk)
             out_file.write(chunk)
     await upload.close()
+    try:
+        _validate_open_document_package(target_path, extension)
+    except ValueError:
+        try:
+            target_path.unlink()
+        except FileNotFoundError:
+            pass
+        raise
     return str(target_path), size, hasher.hexdigest()
 
 
@@ -1107,7 +1244,7 @@ async def upload_documents(
             "chunks_done": 0,
         }
 
-        def _apply_progress(phase: Optional[str] = None) -> None:
+        def _apply_progress(phase: Optional[JobPhase] = None) -> None:
             job.phase = phase or job.phase
             job.totals = JobProgressTotals(**totals)
             job.progress = _compute_progress(totals)
@@ -1153,6 +1290,10 @@ async def upload_documents(
                         pages = await _extract_docx_text(entry["path"])
                     elif mime == "application/vnd.oasis.opendocument.text":
                         pages = await _extract_odt_text(entry["path"])
+                    elif mime == "application/vnd.oasis.opendocument.spreadsheet":
+                        pages = await _extract_ods_text(entry["path"])
+                    elif mime == "application/vnd.oasis.opendocument.presentation":
+                        pages = await _extract_odp_text(entry["path"])
                     elif mime == "text/plain":
                         pages = await _extract_txt_text(entry["path"])
                     elif mime == "application/msword":
@@ -1373,7 +1514,7 @@ async def rebuild_index(rag_slug: str, user_id: str) -> str:
                     "total_chunks": total_chunks,
                     "dimension": dimension,
                     "suggestions": len(suggestions),
-                    "suggestions_secondary": len(suggestions_secondary),
+                    "suggestions_secondary": len(suggestions_en),
                     "suggestions_lang": lang_primary,
                     "suggestions_error": suggestions_error,
                 }
@@ -1484,7 +1625,7 @@ async def list_rag_users(rag_slug: str) -> RagUsersResponse:
     for user_id in user_ids:
         doc = await find_user_by_id(str(user_id))
         if doc:
-            users.append(RagUser(id=str(doc["_id"]), email=doc["email"], name=doc["name"], role=doc.get("role", "user")))
+            users.append(RagUser(_id=str(doc["_id"]), email=doc["email"], name=doc["name"], role=doc.get("role", "user")))
     payload = {"rag_slug": rag_slug, "users": [user.model_dump(by_alias=True) for user in users]}
     return RagUsersResponse(**with_corr_id(payload))
 

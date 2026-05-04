@@ -5,7 +5,7 @@ Admin routes for document uploads, indexing, and status polling.
 
 from __future__ import annotations
 
-from typing import Optional
+from typing import Literal, Optional
 
 from fastapi import APIRouter, Depends, File, Form, Query, UploadFile, status
 from pydantic import BaseModel

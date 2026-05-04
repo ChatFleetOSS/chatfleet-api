@@ -4,15 +4,29 @@ import fetch from "node-fetch";
 import { RagUploadAccepted } from "../../../schemas";
 
 const UPLOAD_BOUNDARY = "--------------------------PactBoundary";
-const MULTIPART_BODY =
-  `--${UPLOAD_BOUNDARY}\r\n` +
-  `Content-Disposition: form-data; name="rag_slug"\r\n\r\n` +
-  `policies\r\n` +
-  `--${UPLOAD_BOUNDARY}\r\n` +
-  `Content-Disposition: form-data; name="files"; filename="handbook.pdf"\r\n` +
-  `Content-Type: application/pdf\r\n\r\n` +
-  `%PDF-1.7 placeholder%\r\n` +
-  `--${UPLOAD_BOUNDARY}--\r\n`;
+const RAG_SLUG = "policies";
+
+type UploadCase = {
+  label: string;
+  filename: string;
+  mime: string;
+  contents: string;
+};
+
+const uploadCases: UploadCase[] = [
+  {
+    label: "PDF",
+    filename: "handbook.pdf",
+    mime: "application/pdf",
+    contents: "%PDF-1.7 pact fixture",
+  },
+  {
+    label: "TXT",
+    filename: "notes.txt",
+    mime: "text/plain",
+    contents: "Plain text pact fixture",
+  },
+];
 
 const provider = new PactV3({
   consumer: "ChatFleet-Frontend",
@@ -20,57 +34,75 @@ const provider = new PactV3({
   logLevel: "debug",
 });
 
-describe("Pact — /rag/upload", () => {
-  it("accepts a multipart PDF upload and returns a job_id", async () => {
-    provider
-      .given("RAG 'policies' exists and caller is admin")
-      .uponReceiving("a file upload")
-      .withRequest({
-        method: "POST",
-        path: "/api/rag/upload",
-        headers: {
-          Authorization: M.regex(/^Bearer .+/, "Bearer token"),
-          "Content-Type": `multipart/form-data; boundary=${UPLOAD_BOUNDARY}`,
-        },
-        body: MULTIPART_BODY,
-      })
-      .willRespondWith({
-        status: 202,
-        headers: { "Content-Type": "application/json; charset=utf-8" },
-        body: {
-          job_id: M.uuid(),
-          accepted: M.eachLike("handbook.pdf"),
-          skipped: M.constrainedArrayLike("duplicate.pdf", 0, 20, 1),
-          rag_slug: "policies",
-          corr_id: M.uuid(),
-        },
-      });
+function multipartBody({ filename, mime, contents }: UploadCase) {
+  return (
+    `--${UPLOAD_BOUNDARY}\r\n` +
+    `Content-Disposition: form-data; name="rag_slug"\r\n\r\n` +
+    `${RAG_SLUG}\r\n` +
+    `--${UPLOAD_BOUNDARY}\r\n` +
+    `Content-Disposition: form-data; name="files"; filename="${filename}"\r\n` +
+    `Content-Type: ${mime}\r\n\r\n` +
+    `${contents}\r\n` +
+    `--${UPLOAD_BOUNDARY}--\r\n`
+  );
+}
 
-    try {
-      await provider.executeTest(async (mockServer) => {
-        const res = await fetch(`${mockServer.url}/api/rag/upload`, {
+describe("Pact — /rag/upload", () => {
+  it.each(uploadCases)(
+    "accepts a multipart $label upload and returns a job_id",
+    async (uploadCase) => {
+      const body = multipartBody(uploadCase);
+
+      provider
+        .given("RAG 'policies' exists and caller is admin")
+        .uponReceiving(`a ${uploadCase.label} file upload`)
+        .withRequest({
           method: "POST",
+          path: "/api/rag/upload",
           headers: {
-            Authorization: "Bearer token",
+            Authorization: M.regex(/^Bearer .+/, "Bearer token"),
             "Content-Type": `multipart/form-data; boundary=${UPLOAD_BOUNDARY}`,
-            "Content-Length": Buffer.byteLength(MULTIPART_BODY).toString(),
           },
-          body: MULTIPART_BODY,
+          body,
+        })
+        .willRespondWith({
+          status: 202,
+          headers: { "Content-Type": "application/json; charset=utf-8" },
+          body: {
+            job_id: M.uuid(),
+            accepted: M.eachLike(uploadCase.filename),
+            skipped: M.constrainedArrayLike("duplicate.pdf", 0, 20, 1),
+            rag_slug: RAG_SLUG,
+            corr_id: M.uuid(),
+          },
         });
 
-        const bodyText = await res.text();
-        if (res.status !== 202) {
-          console.error("Upload pact mock server response:", bodyText);
-        }
+      try {
+        await provider.executeTest(async (mockServer) => {
+          const res = await fetch(`${mockServer.url}/api/rag/upload`, {
+            method: "POST",
+            headers: {
+              Authorization: "Bearer token",
+              "Content-Type": `multipart/form-data; boundary=${UPLOAD_BOUNDARY}`,
+              "Content-Length": body.length.toString(),
+            },
+            body,
+          });
 
-        expect(res.status).toBe(202);
-        const json = JSON.parse(bodyText);
-        const parsed = RagUploadAccepted.safeParse(json);
-        expect(parsed.success).toBe(true);
-      });
-    } catch (error) {
-      console.error("Upload pact error:", error);
-      throw error;
+          const bodyText = await res.text();
+          if (res.status !== 202) {
+            console.error("Upload pact mock server response:", bodyText);
+          }
+
+          expect(res.status).toBe(202);
+          const json = JSON.parse(bodyText);
+          const parsed = RagUploadAccepted.safeParse(json);
+          expect(parsed.success).toBe(true);
+        });
+      } catch (error) {
+        console.error("Upload pact error:", error);
+        throw error;
+      }
     }
-  });
+  );
 });

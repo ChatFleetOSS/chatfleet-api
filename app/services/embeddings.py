@@ -9,7 +9,7 @@ import asyncio
 import hashlib
 import math
 import os
-from typing import Iterable, List
+from typing import TYPE_CHECKING, Any, Iterable, List, cast
 
 import numpy as np
 import logging
@@ -18,6 +18,9 @@ os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 
 from app.core.config import settings
 from app.services.runtime_config import get_llm_config, get_api_key
+
+if TYPE_CHECKING:
+    from app.models.admin import LLMConfigTestRequest
 
 try:
     from openai import OpenAI
@@ -83,7 +86,7 @@ async def _embed_texts_local(texts: list[str], model_name: str) -> List[List[flo
 
     def _call() -> List[List[float]]:
         vecs = model.encode(texts, normalize_embeddings=True, convert_to_numpy=True)
-        vecs = vecs.astype("float32")
+        vecs = cast(Any, vecs).astype("float32")
         return vecs.tolist()
 
     return await loop.run_in_executor(None, _call)

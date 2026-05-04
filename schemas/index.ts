@@ -101,11 +101,22 @@ export const DocStatusEnum = z.enum([
   "error",
 ]);
 
+export const RagDocumentMime = z.enum([
+  "application/pdf",
+  "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  "application/vnd.oasis.opendocument.text",
+  "application/vnd.oasis.opendocument.spreadsheet",
+  "application/vnd.oasis.opendocument.presentation",
+  "text/plain",
+  "application/msword",
+]);
+export type RagDocumentMime = z.infer<typeof RagDocumentMime>;
+
 export const RagDoc = z.object({
   doc_id: UUID,
   filename: z.string(),
   path: z.string().nullable().optional(),
-  mime: z.enum(["application/pdf"]),
+  mime: RagDocumentMime,
   size_bytes: z.number().int().min(0),
   sha256: z.string().nullable().optional(),
   status: DocStatusEnum,

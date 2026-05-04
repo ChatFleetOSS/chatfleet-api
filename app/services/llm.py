@@ -11,7 +11,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, cast
 from functools import partial
 
 try:
@@ -81,7 +81,7 @@ async def generate_chat_completion(
     def _call(model_name: str) -> Tuple[str, int]:
         response = client.chat.completions.create(
             model=model_name,
-            messages=messages,
+            messages=cast(Any, messages),
             temperature=temperature,
             max_tokens=max_tokens,
             timeout=LLM_REQUEST_TIMEOUT,

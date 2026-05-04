@@ -14,7 +14,6 @@ from openai import OpenAI
 VLLM_BASE_URL = "http://127.0.0.1:2242/v1"
 VLLM_API_KEY = "qjlhqdjlshilejnqe1131245dnjqdhfled"
 CHAT_MODEL = None  # set to a model id string to avoid /v1/models call
-What is 
 
 # ------------ Data structures ------------
 @dataclass(frozen=True)
@@ -57,9 +56,9 @@ class FaissStore:
     def search(self, q_vec: np.ndarray, k: int = 5) -> List[Tuple[Doc, float]]:
         if q_vec.shape[0] != 1:
             raise ValueError("search(): q_vec must have shape (1, dim)")
-        D, I = self.index.search(q_vec, k)
+        distances, indices = self.index.search(q_vec, k)
         hits: List[Tuple[Doc, float]] = []
-        for idx, score in zip(I[0].tolist(), D[0].tolist()):
+        for idx, score in zip(indices[0].tolist(), distances[0].tolist()):
             if idx < 0:
                 continue
             hits.append((self.docs[idx], float(score)))

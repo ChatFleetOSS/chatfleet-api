@@ -18,7 +18,7 @@ from .config import settings
 
 logger = logging.getLogger("chatfleet.mongo")
 
-_mongo_process: Optional[subprocess.Popen[str]] = None
+_mongo_process: Optional[subprocess.Popen[Any]] = None
 _mongo_started_by_app = False
 _mongo_log_handle: Optional[IO[Any]] = None
 

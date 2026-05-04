@@ -27,6 +27,8 @@ class RagDoc(BaseModel):
         "application/pdf",
         "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
         "application/vnd.oasis.opendocument.text",
+        "application/vnd.oasis.opendocument.spreadsheet",
+        "application/vnd.oasis.opendocument.presentation",
         "text/plain",
         "application/msword",
     ]

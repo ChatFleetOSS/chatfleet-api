@@ -405,7 +405,6 @@ async def _generate_answer(
     request: ChatRequest,
     hits: Sequence[tuple[float, ChunkRecord]],
 ) -> Tuple[str, int]:
-    question = request.messages[-1].content if request.messages else ""
     messages = _build_prompt_messages(request, hits)
     _log_prompt_messages(messages, request.rag_slug)
     # prefer runtime default

@@ -237,7 +237,7 @@ async def main() -> None:
     ]
     log("llm", f"Sending chat completion request (timeout={VLLM_TIMEOUT}s, stream={STREAM_CHAT})")
     if STREAM_CHAT:
-        answer = vllm_stream_chat(messages, model_id).strip()
+        vllm_stream_chat(messages, model_id).strip()
     else:
         raise RuntimeError("STREAM_CHAT=0 is disabled here; use test_vllm.py for non-streaming calls.")
 
