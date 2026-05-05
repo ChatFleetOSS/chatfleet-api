@@ -13,22 +13,27 @@ from pydantic import BaseModel
 from app.dependencies.auth import require_admin
 from app.models.jobs import JobAccepted
 from app.models.rag import (
+    RagAdminDetailResponse,
     IndexStatusResponse,
     RagCreateRequest,
     RagCreateResponse,
     RagDeleteRequest,
     RagDeleteResponse,
     RagDocsResponse,
+    RagUpdateRequest,
+    RagUpdateResponse,
     RagUploadAccepted,
 )
 from app.services.logging import write_system_log
 from app.services.rags import (
     create_rag,
     delete_rag,
+    get_rag_admin_detail,
     get_docs,
     get_index_status,
     rebuild_index,
     reset_index,
+    update_rag_metadata,
     upload_documents,
 )
 from app.utils.responses import raise_http_error, with_corr_id
@@ -57,6 +62,23 @@ async def rag_create(
 ) -> RagCreateResponse:
     summary = await create_rag(payload, str(admin_user["_id"]))
     return RagCreateResponse(**with_corr_id({"rag": summary}))
+
+
+@router.get("/admin/rag", response_model=RagAdminDetailResponse)
+async def rag_admin_detail(
+    rag_slug: str = Query(...),
+    admin_user = Depends(require_admin),
+) -> RagAdminDetailResponse:
+    return await get_rag_admin_detail(rag_slug)
+
+
+@router.patch("/admin/rag", response_model=RagUpdateResponse)
+async def rag_admin_update(
+    payload: RagUpdateRequest,
+    admin_user = Depends(require_admin),
+) -> RagUpdateResponse:
+    rag = await update_rag_metadata(payload, str(admin_user["_id"]))
+    return RagUpdateResponse(**with_corr_id({"rag": rag}))
 
 
 @router.post("/rag/upload", response_model=RagUploadAccepted, status_code=status.HTTP_202_ACCEPTED)

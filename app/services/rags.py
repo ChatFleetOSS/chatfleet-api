@@ -35,13 +35,17 @@ from app.core.database import get_collection as mongo_collection
 from app.models.rag import (
     IndexStatusEnum,
     IndexStatusResponse,
+    RagAdminDetail,
+    RagAdminDetailResponse,
+    RagCreateRequest,
     RagDoc,
     RagDocsResponse,
     RagSummary,
+    RagUpdateRequest,
     RagUploadAccepted,
-    RagCreateRequest,
     RagUser,
     RagUsersResponse,
+    normalize_rag_system_prompt,
 )
 from app.models.jobs import JobProgressTotals
 from app.models.jobs import JobPhase
@@ -107,6 +111,14 @@ def _doc_to_summary(doc: Dict[str, Any]) -> RagSummary:
         suggestions=doc.get("suggestions", []) or [],
         suggestions_en=doc.get("suggestions_en", []) or [],
         suggestions_lang=doc.get("suggestions_lang"),
+    )
+
+
+def _doc_to_admin_detail(doc: Dict[str, Any]) -> RagAdminDetail:
+    summary = _doc_to_summary(doc).model_dump()
+    return RagAdminDetail(
+        **summary,
+        system_prompt=normalize_rag_system_prompt(doc.get("system_prompt")),
     )
 
 
@@ -958,7 +970,14 @@ async def get_rag_by_slug(slug: str) -> Optional[Dict[str, Any]]:
     return await col.find_one({"slug": slug})
 
 
-async def create_rag(payload: RagCreateRequest, creator_id: str) -> RagSummary:
+async def get_rag_admin_detail(slug: str) -> RagAdminDetailResponse:
+    rag = await get_rag_by_slug(slug)
+    if not rag:
+        raise_http_error("RAG_NOT_FOUND", f"RAG '{slug}' not found", status_code=404)
+    return RagAdminDetailResponse(**with_corr_id({"rag": _doc_to_admin_detail(rag)}))
+
+
+async def create_rag(payload: RagCreateRequest, creator_id: str) -> RagAdminDetail:
     col = get_collection()
     now = datetime.now(timezone.utc)
     doc: Dict[str, Any] = {
@@ -969,6 +988,7 @@ async def create_rag(payload: RagCreateRequest, creator_id: str) -> RagSummary:
         "docs": [],
         "chunks": 0,
         "visibility": payload.visibility or "private",
+        "system_prompt": normalize_rag_system_prompt(payload.system_prompt),
         "suggestions": [],
         "index": {
             "type": "faiss",
@@ -992,7 +1012,36 @@ async def create_rag(payload: RagCreateRequest, creator_id: str) -> RagSummary:
         user_id=creator_id,
         details={"name": payload.name},
     )
-    return _doc_to_summary(doc)
+    return _doc_to_admin_detail(doc)
+
+
+async def update_rag_metadata(payload: RagUpdateRequest, updater_id: str) -> RagAdminDetail:
+    rag = await get_rag_by_slug(payload.rag_slug)
+    if not rag:
+        raise_http_error("RAG_NOT_FOUND", f"RAG '{payload.rag_slug}' not found", status_code=404)
+
+    updates: Dict[str, Any] = {"last_updated": datetime.now(timezone.utc)}
+    if payload.name is not None:
+        updates["name"] = payload.name
+    if payload.description is not None:
+        updates["description"] = payload.description
+    if payload.visibility is not None:
+        updates["visibility"] = payload.visibility
+    if payload.system_prompt is not None:
+        updates["system_prompt"] = normalize_rag_system_prompt(payload.system_prompt)
+
+    col = get_collection()
+    await col.update_one({"slug": payload.rag_slug}, {"$set": updates})
+    updated = await get_rag_by_slug(payload.rag_slug)
+    if not updated:
+        raise_http_error("RAG_NOT_FOUND", f"RAG '{payload.rag_slug}' not found", status_code=404)
+    await write_system_log(
+        event="rag.update",
+        rag_slug=payload.rag_slug,
+        user_id=updater_id,
+        details={"fields": sorted(updates.keys())},
+    )
+    return _doc_to_admin_detail(updated)
 
 
 async def get_docs(slug: str) -> RagDocsResponse:
