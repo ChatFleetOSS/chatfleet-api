@@ -89,16 +89,33 @@ Notes:
 - **Access:** Admin.
 - **Body:**
   ```json
-  {"slug": "new-rag", "name": "New Knowledge Base", "description": "Short summary", "visibility": "private"}
+  {
+    "slug": "new-rag",
+    "name": "New Knowledge Base",
+    "description": "Short summary",
+    "visibility": "private",
+    "system_prompt": "You are a helpful and warm assistant..."
+  }
   ```
+  `system_prompt` is optional. Omit it, send `null`, or send an empty string to use the built-in default RAG prompt.
 - **Response 201:**
   ```json
   {
-    "rag": {"slug": "new-rag", "name": "New Knowledge Base", "description": "Short summary", "chunks": 0, "last_updated": "...", "visibility": "private"},
+    "rag": {"slug": "new-rag", "name": "New Knowledge Base", "description": "Short summary", "chunks": 0, "last_updated": "...", "visibility": "private", "system_prompt": "You are a helpful and warm assistant..."},
     "corr_id": "..."
   }
   ```
 - **Side effects:** Creates an empty RAG document with no users or files and logs `rag.create`. Follow with `/api/rag/users/add` to grant access and `/api/rag/upload` to ingest PDF, DOCX, ODT, ODS, ODP, or TXT files.
+
+### `GET /api/admin/rag?rag_slug=<slug>`
+- **Access:** Admin.
+- **Response:** Admin-facing RAG metadata, including the effective `system_prompt`. Legacy RAGs without a stored prompt return the built-in default prompt.
+
+### `PATCH /api/admin/rag`
+- **Access:** Admin.
+- **Body:** `{"rag_slug": "new-rag", "name": "Updated", "description": "...", "visibility": "public", "system_prompt": "Answer in a concise support tone."}`
+- **Behavior:** All metadata fields except `rag_slug` are optional, but at least one must be present. Sending `system_prompt` as an empty string resets it to the built-in default.
+- **Response:** Same shape as `GET /api/admin/rag`.
 
 ### `POST /api/rag/upload`
 - **Access:** Admin.

@@ -17,6 +17,7 @@ from fastapi import status
 
 from app.core.corr_id import get_corr_id
 from app.models.chat import ChatRequest, ChatResponse, Citation, Usage
+from app.models.rag import normalize_rag_system_prompt
 from app.services.embeddings import embed_text
 from app.services.jobs import JobRecord, job_manager
 from app.services.llm import generate_chat_completion
@@ -283,20 +284,18 @@ def _ensure_paragraph_spacing(text: str) -> str:
     return "\n".join(result)
 
 
-def _build_prompt_messages(request: ChatRequest, hits: Sequence[tuple[float, ChunkRecord]]) -> List[Dict[str, str]]:
+def _build_prompt_messages(
+    request: ChatRequest,
+    hits: Sequence[tuple[float, ChunkRecord]],
+    system_prompt: str | None = None,
+) -> List[Dict[str, str]]:
     context_clean = _format_hits_clean(hits)
     context_log = _format_hits_for_prompt(hits)
     question = request.messages[-1].content if request.messages else ""
     system_messages: List[Dict[str, str]] = [
         {
             "role": "system",
-            "content": (
-                "You are a helpful and warm assistant. Use ONLY the provided context. "
-                "Every claim must be supported by the context; do not add generic advice or steps that are not present in the excerpts. "
-                "Do not add external or prior knowledge. If the context is thin, give a short, cautious answer and state that more detail is not available in the excerpts. "
-                "If the answer is long, provide a structured synthesis in 5 to 8 points maximum (with sub-points if needed). "
-                "Respond in the user's language using GitHub-flavored Markdown."
-            ),
+            "content": normalize_rag_system_prompt(system_prompt),
         },
     ]
 
@@ -380,13 +379,14 @@ async def _retrieve_hits(rag_slug: str, question: str, top_k: int) -> List[tuple
 async def _generate_answer_with_job(
     request: ChatRequest,
     hits: Sequence[tuple[float, ChunkRecord]],
+    system_prompt: str | None = None,
 ) -> Tuple[str, int]:
     loop = asyncio.get_running_loop()
     future: asyncio.Future[Tuple[str, int]] = loop.create_future()
 
     async def runner(job: JobRecord) -> None:
         try:
-            answer, tokens_out = await _generate_answer(request, hits)
+            answer, tokens_out = await _generate_answer(request, hits, system_prompt)
             job.result = {"answer": answer, "tokens_out": tokens_out}
             if not future.done():
                 future.set_result((answer, tokens_out))
@@ -404,8 +404,9 @@ async def _generate_answer_with_job(
 async def _generate_answer(
     request: ChatRequest,
     hits: Sequence[tuple[float, ChunkRecord]],
+    system_prompt: str | None = None,
 ) -> Tuple[str, int]:
-    messages = _build_prompt_messages(request, hits)
+    messages = _build_prompt_messages(request, hits, system_prompt)
     _log_prompt_messages(messages, request.rag_slug)
     # prefer runtime default
     cfg = await get_llm_config()
@@ -532,7 +533,11 @@ async def handle_chat(request: ChatRequest, user_id: str) -> ChatResponse:
     except Exception:
         pass
     try:
-        answer, tokens_out = await _generate_answer_with_job(request, context_hits)
+        answer, tokens_out = await _generate_answer_with_job(
+            request,
+            context_hits,
+            normalize_rag_system_prompt(rag.get("system_prompt")),
+        )
     except LLMUnavailableError:
         raise_http_error(
             "LLM_UNAVAILABLE",
@@ -641,7 +646,11 @@ async def stream_chat(request: ChatRequest, user_id: str) -> AsyncGenerator[str,
     except Exception:
         pass
     try:
-        answer, tokens_out = await _generate_answer_with_job(request, context_hits)
+        answer, tokens_out = await _generate_answer_with_job(
+            request,
+            context_hits,
+            normalize_rag_system_prompt(rag.get("system_prompt")),
+        )
     except LLMUnavailableError:
         async def _send_error() -> AsyncGenerator[str, None]:
             payload = {

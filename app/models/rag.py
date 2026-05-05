@@ -8,13 +8,26 @@ from __future__ import annotations
 from datetime import datetime
 from typing import List, Literal, Optional
 
-from pydantic import BaseModel, Field, model_validator, ConfigDict
+from pydantic import BaseModel, Field, field_validator, model_validator, ConfigDict
 
 from .common import ObjectIdStr, RagSlug, UUIDStr
 
 DocStatusEnum = Literal["uploaded", "chunking", "chunked", "indexing", "indexed", "error"]
 IndexStatusEnum = Literal["idle", "building", "error"]
 VisibilityEnum = Literal["private", "public"]
+RAG_SYSTEM_PROMPT_MAX_LENGTH = 4000
+DEFAULT_RAG_SYSTEM_PROMPT = (
+    "You are a helpful and warm assistant. Use ONLY the provided context. "
+    "Every claim must be supported by the context; do not add generic advice or steps that are not present in the excerpts. "
+    "Do not add external or prior knowledge. If the context is thin, give a short, cautious answer and state that more detail is not available in the excerpts. "
+    "If the answer is long, provide a structured synthesis in 5 to 8 points maximum (with sub-points if needed). "
+    "Respond in the user's language using GitHub-flavored Markdown."
+)
+
+
+def normalize_rag_system_prompt(value: Optional[str]) -> str:
+    text = (value or "").strip()
+    return text or DEFAULT_RAG_SYSTEM_PROMPT
 
 
 class RagDoc(BaseModel):
@@ -54,9 +67,21 @@ class RagSummary(BaseModel):
     suggestions_lang: Optional[str] = Field(default=None, description="BCP-47 language code for primary suggestions")
 
 
+class RagAdminDetail(RagSummary):
+    system_prompt: str = Field(
+        default=DEFAULT_RAG_SYSTEM_PROMPT,
+        max_length=RAG_SYSTEM_PROMPT_MAX_LENGTH,
+    )
+
+
 class RagListResponse(BaseModel):
     items: List[RagSummary]
     next_cursor: Optional[str] = None
+    corr_id: str
+
+
+class RagAdminDetailResponse(BaseModel):
+    rag: RagAdminDetail
     corr_id: str
 
 
@@ -91,10 +116,45 @@ class RagCreateRequest(BaseModel):
     name: str = Field(min_length=1, max_length=120)
     description: str = Field(default="", max_length=500)
     visibility: VisibilityEnum = Field(default="private")
+    system_prompt: Optional[str] = Field(default=None, max_length=RAG_SYSTEM_PROMPT_MAX_LENGTH)
+
+    @field_validator("system_prompt")
+    @classmethod
+    def trim_system_prompt(cls, value: Optional[str]) -> Optional[str]:
+        return value.strip() if value is not None else None
 
 
 class RagCreateResponse(BaseModel):
-    rag: RagSummary
+    rag: RagAdminDetail
+    corr_id: str
+
+
+class RagUpdateRequest(BaseModel):
+    rag_slug: RagSlug
+    name: Optional[str] = Field(default=None, min_length=1, max_length=120)
+    description: Optional[str] = Field(default=None, max_length=500)
+    visibility: Optional[VisibilityEnum] = None
+    system_prompt: Optional[str] = Field(default=None, max_length=RAG_SYSTEM_PROMPT_MAX_LENGTH)
+
+    @field_validator("system_prompt")
+    @classmethod
+    def trim_system_prompt(cls, value: Optional[str]) -> Optional[str]:
+        return value.strip() if value is not None else None
+
+    @model_validator(mode="after")
+    def validate_has_update(self) -> "RagUpdateRequest":
+        if (
+            self.name is None
+            and self.description is None
+            and self.visibility is None
+            and self.system_prompt is None
+        ):
+            raise ValueError("Provide at least one RAG metadata field to update")
+        return self
+
+
+class RagUpdateResponse(BaseModel):
+    rag: RagAdminDetail
     corr_id: str
 
 
