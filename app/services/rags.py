@@ -25,9 +25,7 @@ from PyPDF2 import PdfReader
 from docx import Document as DocxDocument
 from odf.opendocument import load as load_odt
 from odf import teletype
-from odf.draw import Page as OdpSlide
-from odf.text import H as OdfHeading, P as OdtParagraph
-from odf.table import Table as OdtTable, TableRow as OdtTableRow, TableCell as OdtTableCell
+from odf.table import TableRow as OdtTableRow, TableCell as OdtTableCell
 from pymongo.errors import DuplicateKeyError
 
 from app.core.config import settings
@@ -186,9 +184,27 @@ def _extract_cell_text(cell: OdtTableCell) -> str:
     return ""
 
 
+def _iter_odf_nodes(root: Any, local_names: set[str]) -> List[Any]:
+    matches: List[Any] = []
+
+    def _walk(node: Any) -> None:
+        qname = getattr(node, "qname", None)
+        if isinstance(qname, tuple) and len(qname) >= 2 and qname[1] in local_names:
+            matches.append(node)
+        for child in getattr(node, "childNodes", []) or []:
+            _walk(child)
+
+    _walk(root)
+    for attr in ("body", "text", "spreadsheet", "presentation", "topnode"):
+        child = getattr(root, attr, None)
+        if child is not None:
+            _walk(child)
+    return matches
+
+
 def _row_cells_text(row: OdtTableRow) -> List[str]:
     cells: List[str] = []
-    for cell in row.getElementsByType(OdtTableCell):
+    for cell in _iter_odf_nodes(row, {"table-cell", "covered-table-cell"}):
         text = _extract_cell_text(cell)
         repeat = cell.getAttribute("numbercolumnsrepeated")
         try:
@@ -281,14 +297,14 @@ async def _extract_odt_text(path: str) -> List[PageText]:
         pages: List[PageText] = []
         page = 1
 
-        for para in doc.getElementsByType(OdtParagraph):
+        for para in _iter_odf_nodes(doc, {"p"}):
             text = _clean_extracted_text(teletype.extractText(para))
             if text:
                 pages.append(PageText(page=page, text=text))
                 page += 1
 
-        for table in doc.getElementsByType(OdtTable):
-            for row in table.getElementsByType(OdtTableRow):
+        for table in _iter_odf_nodes(doc, {"table"}):
+            for row in _iter_odf_nodes(table, {"table-row"}):
                 cells = _row_cells_text(row)
                 if cells:
                     pages.append(PageText(page=page, text=" | ".join(cells)))
@@ -306,10 +322,10 @@ async def _extract_ods_text(path: str) -> List[PageText]:
     def _read() -> List[PageText]:
         doc = load_odt(path)
         pages: List[PageText] = []
-        for sheet_index, sheet in enumerate(doc.getElementsByType(OdtTable), start=1):
+        for sheet_index, sheet in enumerate(_iter_odf_nodes(doc, {"table"}), start=1):
             sheet_name = sheet.getAttribute("name") or f"Sheet {sheet_index}"
             row_number = 0
-            for row in sheet.getElementsByType(OdtTableRow):
+            for row in _iter_odf_nodes(sheet, {"table-row"}):
                 repeat = row.getAttribute("numberrowsrepeated")
                 try:
                     repeat_count = max(1, min(int(repeat or 1), 32))
@@ -339,14 +355,13 @@ async def _extract_odp_text(path: str) -> List[PageText]:
     def _read() -> List[PageText]:
         doc = load_odt(path)
         pages: List[PageText] = []
-        for slide_index, slide in enumerate(doc.getElementsByType(OdpSlide), start=1):
+        for slide_index, slide in enumerate(_iter_odf_nodes(doc, {"page"}), start=1):
             slide_name = slide.getAttribute("name") or f"Slide {slide_index}"
             text_blocks: List[str] = []
-            for node_type in (OdfHeading, OdtParagraph):
-                for node in slide.getElementsByType(node_type):
-                    text = _clean_extracted_text(teletype.extractText(node))
-                    if text:
-                        text_blocks.append(text)
+            for node in _iter_odf_nodes(slide, {"h", "p"}):
+                text = _clean_extracted_text(teletype.extractText(node))
+                if text:
+                    text_blocks.append(text)
             if text_blocks:
                 pages.append(
                     PageText(

@@ -32,12 +32,43 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Python lint (ruff, non-blocking) and syntax check
+      - name: Install API deps
+        run: bash scripts/install_python_deps.sh
+
+      - name: Python lint and syntax check
         run: |
           pip install --no-cache-dir ruff
           ruff --version
-          ruff check app || true
-          python -m compileall -q app
+          ruff check \
+            app/services/chat.py \
+            app/services/embeddings.py \
+            app/services/hybrid_retrieval.py \
+            app/services/lexical_search.py \
+            app/services/rags.py \
+            app/services/runtime_config.py \
+            app/services/vectorstore.py \
+            scripts/rag_e2e_smoke.py \
+            scripts/seed_admin.py \
+            tests/test_chat_retrieval_diagnostics_unit.py \
+            tests/test_embeddings_unit.py \
+            tests/test_hybrid_retrieval_smoke.py \
+            tests/test_hybrid_retrieval_unit.py \
+            tests/test_opendocument_ingestion_unit.py
+          python -m compileall -q app tests scripts
+      - name: RAG regression unit tests
+        env:
+          JWT_SECRET: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+          OPENAI_API_KEY: ""
+        run: |
+          python -m unittest \
+            tests.test_hybrid_retrieval_unit \
+            tests.test_hybrid_retrieval_smoke \
+            tests.test_embeddings_unit \
+            tests.test_chat_retrieval_diagnostics_unit \
+            tests.test_opendocument_ingestion_unit \
+            tests.test_rag_system_prompt_unit \
+            tests.test_suggestions_unit \
+            -v
       - name: Type check (mypy, non-blocking)
         run: |
           pip install --no-cache-dir mypy
@@ -246,6 +277,16 @@ jobs:
         run: |
           pip install --no-cache-dir httpx
           python scripts/ci_smoke.py --base http://127.0.0.1:8000/api
+
+      - name: RAG E2E smoke (ingest, index, chat)
+        env:
+          BASE_URL: http://127.0.0.1:8000/api
+          ADMIN_EMAIL: admin@chatfleet.local
+          ADMIN_PASSWORD: adminpass
+          REQUIRE_CHAT_SUCCESS: "1"
+        run: |
+          python scripts/seed_admin.py
+          python scripts/rag_e2e_smoke.py
 
       - name: Verify provider pact
         id: provider_verify

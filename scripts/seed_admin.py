@@ -1,6 +1,11 @@
 import asyncio
 import os
+import sys
 from datetime import datetime, timezone
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
 from motor.motor_asyncio import AsyncIOMotorClient
 from app.services.users import hash_password
 

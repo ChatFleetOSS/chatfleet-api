@@ -14,11 +14,39 @@ from cryptography.fernet import Fernet, InvalidToken
 from motor.motor_asyncio import AsyncIOMotorCollection
 
 from app.core.database import get_collection
-from app.models.admin import LLMConfigUpdateRequest, LLMConfigView
+from app.models.admin import LLMConfigUpdateRequest, LLMConfigView, RetrievalConfig
 from app.core.config import settings
 
 
 _CACHE: Optional[Tuple[LLMConfigView, datetime]] = None
+
+
+def default_retrieval_config() -> RetrievalConfig:
+    return RetrievalConfig(
+        mode="hybrid",
+        top_k_default=int(settings.top_k_default),
+        semantic_min_score=0.2,
+        candidate_multiplier=4,
+        candidate_min=24,
+        rrf_k=60,
+        semantic_weight=1.0,
+        lexical_weight=1.0,
+        bm25_k1=1.5,
+        bm25_b=0.75,
+        lexical_prewarm=bool(settings.hybrid_lexical_prewarm),
+    )
+
+
+def _retrieval_from_doc(doc: dict[str, Any]) -> RetrievalConfig:
+    defaults = default_retrieval_config()
+    stored = doc.get("retrieval") or {}
+    if not isinstance(stored, dict):
+        stored = {}
+    payload = defaults.model_dump()
+    payload.update({key: value for key, value in stored.items() if value is not None})
+    if "top_k_default" not in stored and doc.get("top_k_default") is not None:
+        payload["top_k_default"] = int(doc["top_k_default"])
+    return RetrievalConfig(**payload)
 
 
 def _col() -> AsyncIOMotorCollection:
@@ -90,6 +118,7 @@ async def get_llm_config() -> LLMConfigView:
     if provider == "vllm":
         embed_provider = "local"
 
+    retrieval = _retrieval_from_doc(doc)
     cfg = LLMConfigView(
         provider=provider,
         base_url=doc.get("base_url"),
@@ -97,7 +126,8 @@ async def get_llm_config() -> LLMConfigView:
         embed_model=doc.get("embed_model", "BAAI/bge-m3"),
         embed_provider=embed_provider,
         temperature_default=float(doc.get("temperature_default", 0.2)),
-        top_k_default=int(doc.get("top_k_default", 12)),
+        top_k_default=int(retrieval.top_k_default),
+        retrieval=retrieval,
         index_dir=str(doc.get("index_dir", settings.index_dir)),
         upload_dir=str(doc.get("upload_dir", settings.upload_dir)),
         max_upload_mb=int(doc.get("max_upload_mb", settings.max_upload_mb)),
@@ -119,6 +149,13 @@ async def set_llm_config(payload: LLMConfigUpdateRequest, actor_id: str) -> LLMC
     embed_provider = payload.embed_provider
     if payload.provider == "vllm":
         embed_provider = "local"
+    current = await get_llm_config()
+    retrieval_payload = current.retrieval.model_dump()
+    if payload.retrieval is not None:
+        retrieval_payload.update(payload.retrieval.model_dump(exclude_none=True))
+    if payload.top_k_default is not None:
+        retrieval_payload["top_k_default"] = payload.top_k_default
+    retrieval = RetrievalConfig(**retrieval_payload)
     col = _col()
     doc: Dict[str, Any] = {
         "_id": "runtime",
@@ -128,7 +165,8 @@ async def set_llm_config(payload: LLMConfigUpdateRequest, actor_id: str) -> LLMC
         "embed_model": payload.embed_model,
         "embed_provider": embed_provider,
         "temperature_default": payload.temperature_default if payload.temperature_default is not None else 0.2,
-        "top_k_default": payload.top_k_default if payload.top_k_default is not None else 12,
+        "top_k_default": retrieval.top_k_default,
+        "retrieval": retrieval.model_dump(),
         "index_dir": str(payload.index_dir) if payload.index_dir is not None else str(settings.index_dir),
         "upload_dir": str(payload.upload_dir) if payload.upload_dir is not None else str(settings.upload_dir),
         "max_upload_mb": int(payload.max_upload_mb) if payload.max_upload_mb is not None else int(settings.max_upload_mb),
@@ -174,3 +212,11 @@ def get_runtime_overrides_sync() -> tuple[Path, Path, int, float, int]:
     temperature_default = float(cfg.temperature_default) if cfg and getattr(cfg, "temperature_default", None) else float(settings.temperature_default)
     top_k_default = int(cfg.top_k_default) if cfg and getattr(cfg, "top_k_default", None) else int(settings.top_k_default)
     return index_dir, upload_dir, max_upload_mb, temperature_default, top_k_default
+
+
+def get_retrieval_config_sync() -> RetrievalConfig:
+    """Return runtime retrieval settings, falling back to environment defaults."""
+    cfg = _CACHE[0] if _CACHE else None
+    if cfg and getattr(cfg, "retrieval", None):
+        return cfg.retrieval
+    return default_retrieval_config()

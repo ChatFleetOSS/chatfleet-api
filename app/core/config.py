@@ -35,6 +35,7 @@ class Settings(BaseModel):
     sse_heartbeat_ms: int = Field(alias="SSE_HEARTBEAT_MS")
     top_k_default: int = Field(alias="TOP_K_DEFAULT")
     temperature_default: float = Field(alias="TEMPERATURE_DEFAULT")
+    hybrid_lexical_prewarm: bool = Field(alias="HYBRID_LEXICAL_PREWARM")
     cors_origins: List[str] = Field(alias="CORS_ORIGINS")
     build_version: str = Field(alias="CHATFLEET_BUILD_VERSION")
     build_commit: str = Field(alias="CHATFLEET_BUILD_COMMIT")
@@ -102,6 +103,7 @@ def load_settings() -> Settings:
         "SSE_HEARTBEAT_MS": "15000",
         "TOP_K_DEFAULT": "12",
         "TEMPERATURE_DEFAULT": "0.2",
+        "HYBRID_LEXICAL_PREWARM": "0",
         "CORS_ORIGINS": "http://localhost:3000",
         "CHATFLEET_BUILD_VERSION": "dev",
         "CHATFLEET_BUILD_COMMIT": "local",

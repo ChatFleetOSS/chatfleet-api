@@ -19,12 +19,14 @@ from app.core.corr_id import get_corr_id
 from app.models.chat import ChatRequest, ChatResponse, Citation, Usage
 from app.models.rag import normalize_rag_system_prompt
 from app.services.embeddings import embed_text
+from app.models.admin import RetrievalConfig
+from app.services.hybrid_retrieval import HybridRetrievalResult, hybrid_retrieve, chunk_key
 from app.services.jobs import JobRecord, job_manager
 from app.services.llm import generate_chat_completion
 from app.services.runtime_config import get_llm_config, get_api_key
 from app.services.logging import write_system_log
 from app.services.rags import get_rag_by_slug
-from app.services.vectorstore import ChunkRecord, query_index
+from app.services.vectorstore import ChunkRecord
 from app.utils.responses import raise_http_error
 
 logger = logging.getLogger("chatfleet.chat")
@@ -120,6 +122,57 @@ def _topk_log_text(hits: Sequence[tuple[float, ChunkRecord]], limit: int = 10) -
             f"{idx}) score={score:.3f} doc={record.doc_id} file={record.filename}{page_hint} idx={record.chunk_index} len={len(record.text)}\n{record.text.strip()}"
         )
     return "\n".join(parts)
+
+
+def _retrieval_hit_details(
+    result: HybridRetrievalResult,
+    limit: int = 10,
+) -> List[Dict[str, Any]]:
+    details: List[Dict[str, Any]] = []
+    for score, record in result.hits[:limit]:
+        key = chunk_key(record)
+        details.append(
+            {
+                "score": float(score),
+                "rrf_score": float(score),
+                "semantic_rank": result.diagnostics.semantic_ranks.get(key),
+                "lexical_rank": result.diagnostics.lexical_ranks.get(key),
+                "doc_id": record.doc_id,
+                "chunk_index": record.chunk_index,
+                "filename": record.filename,
+                "page_start": record.page_start,
+                "page_end": record.page_end,
+            }
+        )
+    return details
+
+
+def _log_no_context(
+    *,
+    rag_slug: str,
+    corr_id: str,
+    question: str,
+    top_k: int,
+    retrieval_config: RetrievalConfig | None,
+    result: HybridRetrievalResult,
+    stream: bool = False,
+) -> None:
+    event = "chat.retrieval.no_context.stream" if stream else "chat.retrieval.no_context"
+    retrieval_logger.warning(
+        event,
+        extra={
+            "corr_id": corr_id,
+            "rag_slug": rag_slug,
+            "question": question,
+            "top_k": top_k,
+            "retrieval_mode": retrieval_config.mode if retrieval_config else "hybrid",
+            "semantic_hit_count": result.diagnostics.semantic_count,
+            "lexical_hit_count": result.diagnostics.lexical_count,
+            "final_hit_count": result.diagnostics.final_count,
+            "index_missing": result.diagnostics.index_missing,
+            "index_error": result.diagnostics.index_error,
+        },
+    )
 
 
 def _has_query_overlap(question: str, hits: Sequence[tuple[float, ChunkRecord]]) -> bool:
@@ -395,17 +448,28 @@ def _build_citations_from_hits(hits: Sequence[tuple[float, ChunkRecord]]) -> Lis
     return citations
 
 
-async def _retrieve_hits(rag_slug: str, question: str, top_k: int) -> List[tuple[float, ChunkRecord]]:
+async def _retrieve_hits(
+    rag_slug: str,
+    question: str,
+    top_k: int,
+    retrieval_config: RetrievalConfig | None = None,
+) -> HybridRetrievalResult:
     vector = await embed_text(question)
     loop = asyncio.get_running_loop()
 
-    def _query() -> List[tuple[float, ChunkRecord]]:
-        return query_index(rag_slug, vector, top_k, min_score=RETRIEVAL_MIN_SCORE)
+    def _query() -> HybridRetrievalResult:
+        return hybrid_retrieve(
+            rag_slug,
+            vector,
+            question,
+            top_k,
+            min_semantic_score=(
+                retrieval_config.semantic_min_score if retrieval_config else RETRIEVAL_MIN_SCORE
+            ),
+            retrieval_config=retrieval_config,
+        )
 
-    try:
-        return await loop.run_in_executor(None, _query)
-    except FileNotFoundError:
-        return []
+    return await loop.run_in_executor(None, _query)
 
 
 async def _generate_answer_with_job(
@@ -507,11 +571,21 @@ async def handle_chat(request: ChatRequest, user_id: str) -> ChatResponse:
         raise_http_error("RAG_NOT_FOUND", f"RAG '{request.rag_slug}' not found", status_code=404)
 
     cfg = await get_llm_config()
+    retrieval_config = getattr(cfg, "retrieval", None)
     top_k = request.opts.top_k if request.opts and request.opts.top_k else cfg.top_k_default
     last_message = request.messages[-1]
     question = last_message.content
-    hits = await _retrieve_hits(request.rag_slug, question, top_k)
+    retrieval_result = await _retrieve_hits(request.rag_slug, question, top_k, retrieval_config)
+    hits = retrieval_result.hits
     if not hits:
+        _log_no_context(
+            rag_slug=request.rag_slug,
+            corr_id=get_corr_id(),
+            question=question,
+            top_k=top_k,
+            retrieval_config=retrieval_config,
+            result=retrieval_result,
+        )
         raise_http_error(
             "NO_CONTEXT",
             "No supporting snippets were retrieved for this query; cannot answer without context.",
@@ -524,20 +598,16 @@ async def handle_chat(request: ChatRequest, user_id: str) -> ChatResponse:
         extra={
             "corr_id": corr_id,
             "rag_slug": request.rag_slug,
+            "retrieval_mode": retrieval_config.mode if retrieval_config else "hybrid",
             "top_k": top_k,
-            "min_score": RETRIEVAL_MIN_SCORE,
+            "min_score": (
+                retrieval_config.semantic_min_score if retrieval_config else RETRIEVAL_MIN_SCORE
+            ),
+            "semantic_hit_count": retrieval_result.diagnostics.semantic_count,
+            "lexical_hit_count": retrieval_result.diagnostics.lexical_count,
+            "final_hit_count": retrieval_result.diagnostics.final_count,
             "hit_count": len(hits),
-            "hits": [
-                {
-                    "score": float(score),
-                    "doc_id": record.doc_id,
-                    "chunk_index": record.chunk_index,
-                    "filename": record.filename,
-                    "page_start": record.page_start,
-                    "page_end": record.page_end,
-                }
-                for score, record in hits[:10]
-            ],
+            "hits": _retrieval_hit_details(retrieval_result),
             "hit_previews": _preview_hits(hits),
             "question": last_message.content,
             "context_char_budget": CONTEXT_CHAR_BUDGET,
@@ -616,9 +686,20 @@ async def stream_chat(request: ChatRequest, user_id: str) -> AsyncGenerator[str,
     corr_id = get_corr_id()
     question = request.messages[-1].content
     cfg = await get_llm_config()
+    retrieval_config = getattr(cfg, "retrieval", None)
     top_k = request.opts.top_k if request.opts and request.opts.top_k else cfg.top_k_default
-    hits = await _retrieve_hits(request.rag_slug, question, top_k)
+    retrieval_result = await _retrieve_hits(request.rag_slug, question, top_k, retrieval_config)
+    hits = retrieval_result.hits
     if not hits:
+        _log_no_context(
+            rag_slug=request.rag_slug,
+            corr_id=corr_id,
+            question=question,
+            top_k=top_k,
+            retrieval_config=retrieval_config,
+            result=retrieval_result,
+            stream=True,
+        )
         async def _send_error() -> AsyncGenerator[str, None]:
             payload = {
                 "error": {
@@ -638,20 +719,16 @@ async def stream_chat(request: ChatRequest, user_id: str) -> AsyncGenerator[str,
         extra={
             "corr_id": corr_id,
             "rag_slug": request.rag_slug,
+            "retrieval_mode": retrieval_config.mode if retrieval_config else "hybrid",
             "top_k": top_k,
-            "min_score": RETRIEVAL_MIN_SCORE,
+            "min_score": (
+                retrieval_config.semantic_min_score if retrieval_config else RETRIEVAL_MIN_SCORE
+            ),
+            "semantic_hit_count": retrieval_result.diagnostics.semantic_count,
+            "lexical_hit_count": retrieval_result.diagnostics.lexical_count,
+            "final_hit_count": retrieval_result.diagnostics.final_count,
             "hit_count": len(hits),
-            "hits": [
-                {
-                    "score": float(score),
-                    "doc_id": record.doc_id,
-                    "chunk_index": record.chunk_index,
-                    "filename": record.filename,
-                    "page_start": record.page_start,
-                    "page_end": record.page_end,
-                }
-                for score, record in hits[:10]
-            ],
+            "hits": _retrieval_hit_details(retrieval_result),
             "hit_previews": _preview_hits(hits),
             "question": question,
             "context_char_budget": CONTEXT_CHAR_BUDGET,
