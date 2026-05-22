@@ -15,7 +15,7 @@ from typing import Any, List, Optional, Sequence
 import faiss
 import numpy as np
 
-from app.services.runtime_config import get_runtime_overrides_sync
+from app.services.runtime_config import get_retrieval_config_sync, get_runtime_overrides_sync
 
 logger = logging.getLogger("chatfleet.vectorstore")
 logger.setLevel(logging.INFO)
@@ -199,6 +199,17 @@ def build_index(rag_slug: str) -> tuple[int, int]:
             "docs": len(list(doc_dir.glob("*.pkl"))),
         },
     )
+    if get_retrieval_config_sync().lexical_prewarm:
+        try:
+            from app.services.lexical_search import prewarm_lexical_index
+
+            prewarm_lexical_index(rag_slug)
+        except Exception:
+            logger.exception(
+                "rag.index.lexical_prewarm_failed rag=%s",
+                rag_slug,
+                extra={"rag_slug": rag_slug},
+            )
     return len(metadata), dim
 
 
@@ -207,7 +218,21 @@ def load_index(rag_slug: str) -> tuple[faiss.IndexFlatIP, List[ChunkRecord]]:
     index_path = base / INDEX_FILE
     metadata_path = base / METADATA_FILE
     if not index_path.exists() or not metadata_path.exists():
-        raise FileNotFoundError("Index not built for rag")
+        logger.warning(
+            "rag.index.missing rag=%s index_path=%s metadata_path=%s",
+            rag_slug,
+            index_path,
+            metadata_path,
+            extra={
+                "rag_slug": rag_slug,
+                "index_path": str(index_path),
+                "metadata_path": str(metadata_path),
+            },
+        )
+        raise FileNotFoundError(
+            f"Index not built for rag '{rag_slug}' "
+            f"(expected index={index_path}, metadata={metadata_path})"
+        )
     index = faiss.read_index(str(index_path))
     with metadata_path.open("r", encoding="utf-8") as handle:
         entries = json.load(handle)

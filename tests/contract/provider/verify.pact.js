@@ -13,6 +13,11 @@ const ADMIN_PASSWORD = "adminpass";
 const USER_EMAIL = "pact-user@chatfleet.local";
 const USER_PASSWORD = "userpass123";
 const RAG_SLUG = "policies";
+const POLICY_FIXTURE = [
+  "Parental leave policy.",
+  "Eligible employees may request parental leave after twelve months of service.",
+  "The policy keeps benefits active during approved leave and requires HR approval.",
+].join("\n\n");
 
 const tokens = {
   admin: null,
@@ -157,6 +162,62 @@ async function grantRagAccess(baseUrl, adminToken, email) {
   }
 }
 
+function wait(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function waitForJob(baseUrl, token, jobId) {
+  const deadline = Date.now() + 60_000;
+  while (Date.now() < deadline) {
+    const res = await httpFetch(`${baseUrl}/api/jobs/${jobId}`, {
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+    });
+    if (!res.ok) {
+      const body = await res.text();
+      throw new Error(`Failed to poll job ${jobId}: ${res.status} ${body}`);
+    }
+    const data = await res.json();
+    if (data.status === "done") {
+      return;
+    }
+    if (data.status === "error") {
+      throw new Error(`Index job ${jobId} failed: ${JSON.stringify(data)}`);
+    }
+    await wait(500);
+  }
+  throw new Error(`Timed out waiting for index job ${jobId}`);
+}
+
+async function ensurePolicyDocumentIndexed(baseUrl, adminToken) {
+  const form = new FormData();
+  form.append("rag_slug", RAG_SLUG);
+  form.append(
+    "files",
+    new Blob([POLICY_FIXTURE], { type: "text/plain" }),
+    "parental_policy.txt"
+  );
+
+  const res = await httpFetch(`${baseUrl}/api/rag/upload`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${adminToken}`,
+    },
+    body: form,
+  });
+  if (!res.ok) {
+    const body = await res.text();
+    throw new Error(`Failed to upload policy fixture: ${res.status} ${body}`);
+  }
+  const data = await res.json();
+  const jobId = data.job_id;
+  if (!jobId) {
+    throw new Error(`Policy fixture upload did not return a job_id: ${JSON.stringify(data)}`);
+  }
+  await waitForJob(baseUrl, adminToken, jobId);
+}
+
 async function ensureAdminState(baseUrl) {
   await seedAdminUser();
   const adminToken = await login(baseUrl, ADMIN_EMAIL, ADMIN_PASSWORD);
@@ -168,6 +229,7 @@ async function ensureUserState(baseUrl) {
   await ensureAdminState(baseUrl);
   await registerUser(baseUrl, USER_EMAIL, USER_PASSWORD);
   await grantRagAccess(baseUrl, tokens.admin, USER_EMAIL);
+  await ensurePolicyDocumentIndexed(baseUrl, tokens.admin);
   tokens.user = await login(baseUrl, USER_EMAIL, USER_PASSWORD);
 }
 

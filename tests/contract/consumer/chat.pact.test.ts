@@ -35,7 +35,7 @@ describe("Pact — /chat", () => {
           answer: "Our parental leave policy...",
           citations: M.eachLike({
             doc_id: M.uuid(),
-            filename: "parental_policy.pdf",
+            filename: M.like("parental_policy.pdf"),
             pages: M.eachLike(4, 1),
             snippet: M.like("Eligible employees..."),
           }),

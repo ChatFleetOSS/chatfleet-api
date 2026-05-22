@@ -118,8 +118,12 @@ async def embed_texts(texts: Iterable[str]) -> List[List[float]]:
     cfg = None
     try:
         cfg = await get_llm_config()
-        if getattr(cfg, "embed_provider", "openai") == "local":
-            model_name = cfg.embed_model or LOCAL_EMBED_MODEL_DEFAULT
+    except Exception:
+        cfg = None
+
+    if cfg is not None and getattr(cfg, "embed_provider", "openai") == "local":
+        model_name = cfg.embed_model or LOCAL_EMBED_MODEL_DEFAULT
+        try:
             logger.info("embeddings.local", extra={"count": len(items), "model": model_name})
             vectors = await _embed_texts_local(items, model_name)
             logger.info(
@@ -127,8 +131,11 @@ async def embed_texts(texts: Iterable[str]) -> List[List[float]]:
                 extra={"count": len(vectors), "dim": len(vectors[0]) if vectors else 0},
             )
             return vectors
-    except Exception:
-        cfg = None
+        except Exception:
+            logger.exception(
+                "embeddings.local.error",
+                extra={"count": len(items), "model": model_name},
+            )
 
     key = os.getenv("OPENAI_API_KEY")
     if cfg is not None:
@@ -160,7 +167,12 @@ async def embed_texts(texts: Iterable[str]) -> List[List[float]]:
         if getattr(cfg, "embed_provider", "openai") == "local":
             model_name = cfg.embed_model or LOCAL_EMBED_MODEL_DEFAULT
             logger.info("embeddings.local", extra={"count": len(items), "model": model_name})
-            return await _embed_texts_local(items, model_name)
+            vectors = await _embed_texts_local(items, model_name)
+            logger.info(
+                "embeddings.local.ok",
+                extra={"count": len(vectors), "dim": len(vectors[0]) if vectors else 0},
+            )
+            return vectors
         model_name = cfg.embed_model or settings.embed_model
         logger.info("embeddings.remote", extra={"count": len(items), "model": model_name, "provider": cfg.provider})
         vectors = await loop.run_in_executor(None, lambda: _call(model_name))
@@ -171,7 +183,8 @@ async def embed_texts(texts: Iterable[str]) -> List[List[float]]:
         return vectors
     except Exception:
         logger.exception("embeddings.error", extra={"count": len(items)})
-        return [_deterministic_embedding(text) for text in items]
+        dim = _fallback_dim(cfg)
+        return [_deterministic_embedding(text, dim=dim) for text in items]
 
 
 async def embed_text(text: str) -> List[float]:
