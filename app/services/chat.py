@@ -352,14 +352,11 @@ def _build_prompt_messages(
     context_clean = _format_hits_clean(hits)
     context_log = _format_hits_for_prompt(hits)
     question = request.messages[-1].content if request.messages else ""
-    system_messages: List[Dict[str, str]] = [
-        {
-            "role": "system",
-            "content": IMMUTABLE_RAG_SYSTEM_POLICY,
-        },
+    messages: List[Dict[str, str]] = [
         {
             "role": "system",
             "content": (
+                f"{IMMUTABLE_RAG_SYSTEM_POLICY}\n\n"
                 "RAG-specific response instructions. Apply these only when they do not conflict with the non-editable policy above:\n"
                 f"{normalize_rag_system_prompt(system_prompt)}"
             ),
@@ -381,21 +378,29 @@ def _build_prompt_messages(
         "RÉPONSE:\n"
     )
 
-    system_messages.append({"role": "user", "content": user_prompt})
-
-    # Preserve the last turns of the conversation (up to 10 messages).
+    # Preserve recent prior turns only. The latest user question is embedded in
+    # the final RAG prompt so strict local chat templates do not see it twice.
     history: List[Dict[str, str]] = []
-    for message in request.messages[-10:]:
+    for message in request.messages[-10:-1]:
         if message.role == "system":
             continue
+        if message.role == "assistant" and not history:
+            continue
+        if history and history[-1]["role"] == message.role:
+            history[-1] = {"role": message.role, "content": message.content}
+            continue
         history.append({"role": message.role, "content": message.content})
+    if history and history[-1]["role"] == "user":
+        history.pop()
+    messages.extend(history)
+    messages.append({"role": "user", "content": user_prompt})
 
     try:
         logger.info(
             "chat.prompt",
             extra={
                 "corr_id": get_corr_id(),
-                "system_count": len(system_messages),
+                "system_count": 1,
                 "history_count": len(history),
                 "context_preview": context_log[:500],
             },
@@ -403,7 +408,7 @@ def _build_prompt_messages(
     except Exception:
         pass
 
-    return system_messages + history
+    return messages
 
 
 def _validate_chat_request_shape(request: ChatRequest) -> None:

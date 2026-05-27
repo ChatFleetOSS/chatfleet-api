@@ -106,7 +106,7 @@ async def _fake_write_system_log(*_args, **_kwargs) -> None:
 
 
 async def _fake_generate_chat_completion(messages, temperature, max_tokens):
-    context = messages[2]["content"]
+    context = messages[-1]["content"]
     if "R-2024-17" in context:
         return (
             "La procédure R-2024-17 impose de mentionner le motif précis "
