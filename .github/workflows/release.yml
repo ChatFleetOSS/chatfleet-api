@@ -72,14 +72,44 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           generate_release_notes: true
-      - name: Infra promotion reminder
+      - name: Trigger infra stable promotion PR
+        env:
+          GH_TOKEN: ${{ secrets.CHATFLEET_INFRA_TOKEN }}
+          API_TAG: ${{ github.ref_name }}
         run: |
+          set -euo pipefail
+          if [ -z "${GH_TOKEN:-}" ]; then
+            {
+              echo "::error title=Missing CHATFLEET_INFRA_TOKEN::Backend releases must dispatch the infra stable promotion workflow so the public curl installer can consume the new API image."
+              echo "Create a repository secret named CHATFLEET_INFRA_TOKEN with access to ChatFleetOSS/chatfleet-infra workflows and contents."
+            } >&2
+            exit 1
+          fi
+
+          WEB_TAG="$(
+            curl -fsSL https://raw.githubusercontent.com/ChatFleetOSS/chatfleet-infra/main/channels/stable.env \
+              | sed -n 's/^WEB_TAG=//p' \
+              | tail -n1
+          )"
+          if [ -z "$WEB_TAG" ]; then
+            echo "::error title=Cannot resolve stable web tag::channels/stable.env did not contain WEB_TAG"
+            exit 1
+          fi
+
+          gh workflow run promote-channel.yml \
+            --repo ChatFleetOSS/chatfleet-infra \
+            --field channel=stable \
+            --field api_tag="$API_TAG" \
+            --field web_tag="$WEB_TAG"
+
           {
-            echo "## Infra next step"
+            echo "## Infra stable promotion dispatched"
             echo
-            echo "Once the matching frontend release exists, run the \`Promote Channel\` workflow in \`chatfleet-infra\`."
+            echo "The backend release triggered the \`Promote Channel\` workflow in \`chatfleet-infra\`."
             echo
             echo "- channel: \`stable\`"
-            echo "- api_tag: \`${{ github.ref_name }}\`"
-            echo "- web_tag: \`<matching web tag>\`"
+            echo "- api_tag: \`${API_TAG}\`"
+            echo "- web_tag: \`${WEB_TAG}\`"
+            echo
+            echo "The generated infra PR must pass stable install and upgrade smoke tests before merge."
           } >> "$GITHUB_STEP_SUMMARY"

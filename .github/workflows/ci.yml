@@ -53,7 +53,8 @@ jobs:
             tests/test_embeddings_unit.py \
             tests/test_hybrid_retrieval_smoke.py \
             tests/test_hybrid_retrieval_unit.py \
-            tests/test_opendocument_ingestion_unit.py
+            tests/test_opendocument_ingestion_unit.py \
+            tests/test_rag_system_prompt_unit.py
           python -m compileall -q app tests scripts
       - name: RAG regression unit tests
         env:
