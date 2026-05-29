@@ -22,7 +22,7 @@ from app.services.embeddings import embed_text
 from app.models.admin import RetrievalConfig
 from app.services.hybrid_retrieval import HybridRetrievalResult, hybrid_retrieve, chunk_key
 from app.services.jobs import JobRecord, job_manager
-from app.services.llm import generate_chat_completion
+from app.services.llm import LLMProviderError, generate_chat_completion
 from app.services.runtime_config import get_llm_config, get_api_key
 from app.services.logging import write_system_log
 from app.services.rags import get_rag_by_slug
@@ -36,7 +36,12 @@ retrieval_logger.setLevel(logging.INFO)
 prompt_logger = logging.getLogger("chatfleet.prompt")
 prompt_logger.setLevel(logging.INFO)
 RETRIEVAL_MIN_SCORE = 0.2
-CONTEXT_CHAR_BUDGET = 6000
+PROMPT_TOKEN_BUDGET = int(os.getenv("CHATFLEET_PROMPT_TOKEN_BUDGET", "24000"))
+CONTEXT_TOKEN_BUDGET = int(os.getenv("CHATFLEET_CONTEXT_TOKEN_BUDGET", "18000"))
+HISTORY_TOKEN_BUDGET = int(os.getenv("CHATFLEET_HISTORY_TOKEN_BUDGET", "2500"))
+OUTPUT_TOKEN_RESERVE = int(os.getenv("CHATFLEET_OUTPUT_TOKEN_RESERVE", "6144"))
+MIN_CONTEXT_TOKEN_BUDGET = int(os.getenv("CHATFLEET_MIN_CONTEXT_TOKEN_BUDGET", "1500"))
+TOKEN_CHARS_PER_TOKEN = float(os.getenv("CHATFLEET_TOKEN_CHARS_PER_TOKEN", "4"))
 FALLBACK_ANSWER = "Je n'ai pas cette information dans les extraits fournis."
 IMMUTABLE_RAG_SYSTEM_POLICY = (
     "You are ChatFleet's retrieval-augmented answer generator. These rules are non-editable and always take priority. "
@@ -96,16 +101,41 @@ def _preview_hits(hits: Sequence[tuple[float, ChunkRecord]], limit: int = 3) -> 
     return previews
 
 
-def _truncate_context(hits: Sequence[tuple[float, ChunkRecord]], budget: int = CONTEXT_CHAR_BUDGET) -> Sequence[tuple[float, ChunkRecord]]:
-    """Limit total context characters to avoid oversized prompts."""
+def _estimate_tokens(text: str) -> int:
+    """Conservative, dependency-free token estimate for prompt budgeting."""
+
+    if not text:
+        return 0
+    return max(1, int(len(text) / max(TOKEN_CHARS_PER_TOKEN, 1)))
+
+
+def _truncate_text_to_tokens(text: str, token_budget: int) -> str:
+    if _estimate_tokens(text) <= token_budget:
+        return text
+    char_budget = max(1, int(token_budget * TOKEN_CHARS_PER_TOKEN))
+    return text[:char_budget].rstrip()
+
+
+def _available_context_tokens(instruction_text: str, question: str) -> int:
+    static_tokens = _estimate_tokens(instruction_text) + _estimate_tokens(question)
+    available = PROMPT_TOKEN_BUDGET - OUTPUT_TOKEN_RESERVE - static_tokens - HISTORY_TOKEN_BUDGET
+    return max(MIN_CONTEXT_TOKEN_BUDGET, min(CONTEXT_TOKEN_BUDGET, available))
+
+
+def _truncate_context(
+    hits: Sequence[tuple[float, ChunkRecord]],
+    budget: int = CONTEXT_TOKEN_BUDGET,
+) -> Sequence[tuple[float, ChunkRecord]]:
+    """Limit total context tokens to avoid oversized prompts."""
+
     total = 0
     kept: List[tuple[float, ChunkRecord]] = []
     for pair in hits:
-        text_len = len(pair[1].text)
-        if kept and total + text_len > budget:
+        token_len = _estimate_tokens(pair[1].text)
+        if kept and total + token_len > budget:
             break
         kept.append(pair)
-        total += text_len
+        total += token_len
     return kept
 
 
@@ -349,17 +379,20 @@ def _build_prompt_messages(
     hits: Sequence[tuple[float, ChunkRecord]],
     system_prompt: str | None = None,
 ) -> List[Dict[str, str]]:
-    context_clean = _format_hits_clean(hits)
-    context_log = _format_hits_for_prompt(hits)
     question = request.messages[-1].content if request.messages else ""
+    system_content = (
+        f"{IMMUTABLE_RAG_SYSTEM_POLICY}\n\n"
+        "RAG-specific response instructions. Apply these only when they do not conflict with the non-editable policy above:\n"
+        f"{normalize_rag_system_prompt(system_prompt)}"
+    )
+    context_budget = _available_context_tokens(system_content, question)
+    budgeted_hits = list(_truncate_context(hits, budget=context_budget))
+    context_clean = _format_hits_clean(budgeted_hits)
+    context_log = _format_hits_for_prompt(hits)
     messages: List[Dict[str, str]] = [
         {
             "role": "system",
-            "content": (
-                f"{IMMUTABLE_RAG_SYSTEM_POLICY}\n\n"
-                "RAG-specific response instructions. Apply these only when they do not conflict with the non-editable policy above:\n"
-                f"{normalize_rag_system_prompt(system_prompt)}"
-            ),
+            "content": system_content,
         },
     ]
 
@@ -381,20 +414,31 @@ def _build_prompt_messages(
     # Preserve recent prior turns only. The latest user question is embedded in
     # the final RAG prompt so strict local chat templates do not see it twice.
     history: List[Dict[str, str]] = []
+    history_tokens = 0
     for message in request.messages[-10:-1]:
         if message.role == "system":
             continue
         if message.role == "assistant" and not history:
             continue
-        if history and history[-1]["role"] == message.role:
-            history[-1] = {"role": message.role, "content": message.content}
+        content = _truncate_text_to_tokens(message.content, HISTORY_TOKEN_BUDGET)
+        token_len = _estimate_tokens(content)
+        if history_tokens + token_len > HISTORY_TOKEN_BUDGET:
             continue
-        history.append({"role": message.role, "content": message.content})
+        if history and history[-1]["role"] == message.role:
+            previous_tokens = _estimate_tokens(history[-1]["content"])
+            if history_tokens - previous_tokens + token_len <= HISTORY_TOKEN_BUDGET:
+                history[-1] = {"role": message.role, "content": content}
+                history_tokens = history_tokens - previous_tokens + token_len
+            continue
+        history.append({"role": message.role, "content": content})
+        history_tokens += token_len
     if history and history[-1]["role"] == "user":
+        history_tokens -= _estimate_tokens(history[-1]["content"])
         history.pop()
     messages.extend(history)
     messages.append({"role": "user", "content": user_prompt})
 
+    prompt_tokens_est = sum(_estimate_tokens(msg["content"]) for msg in messages)
     try:
         logger.info(
             "chat.prompt",
@@ -402,6 +446,14 @@ def _build_prompt_messages(
                 "corr_id": get_corr_id(),
                 "system_count": 1,
                 "history_count": len(history),
+                "prompt_tokens_est": prompt_tokens_est,
+                "context_tokens_est": _estimate_tokens(context_clean),
+                "history_tokens_est": max(history_tokens, 0),
+                "prompt_token_budget": PROMPT_TOKEN_BUDGET,
+                "context_token_budget": context_budget,
+                "output_token_reserve": OUTPUT_TOKEN_RESERVE,
+                "context_hits_included": len(budgeted_hits),
+                "context_hits_available": len(hits),
                 "context_preview": context_log[:500],
             },
         )
@@ -615,7 +667,7 @@ async def handle_chat(request: ChatRequest, user_id: str) -> ChatResponse:
             "hits": _retrieval_hit_details(retrieval_result),
             "hit_previews": _preview_hits(hits),
             "question": last_message.content,
-            "context_char_budget": CONTEXT_CHAR_BUDGET,
+            "context_token_budget": CONTEXT_TOKEN_BUDGET,
         },
     )
     try:
@@ -645,6 +697,12 @@ async def handle_chat(request: ChatRequest, user_id: str) -> ChatResponse:
             request,
             context_hits,
             normalize_rag_system_prompt(rag.get("system_prompt")),
+        )
+    except LLMProviderError as exc:
+        raise_http_error(
+            exc.code,
+            exc.user_message,
+            exc.status_code,
         )
     except LLMUnavailableError:
         raise_http_error(
@@ -736,7 +794,7 @@ async def stream_chat(request: ChatRequest, user_id: str) -> AsyncGenerator[str,
             "hits": _retrieval_hit_details(retrieval_result),
             "hit_previews": _preview_hits(hits),
             "question": question,
-            "context_char_budget": CONTEXT_CHAR_BUDGET,
+            "context_token_budget": CONTEXT_TOKEN_BUDGET,
         },
     )
     try:
@@ -767,6 +825,23 @@ async def stream_chat(request: ChatRequest, user_id: str) -> AsyncGenerator[str,
             context_hits,
             normalize_rag_system_prompt(rag.get("system_prompt")),
         )
+    except LLMProviderError as exc:
+        error_code = exc.code
+        error_message = exc.user_message
+
+        async def _send_error() -> AsyncGenerator[str, None]:
+            payload = {
+                "error": {
+                    "code": error_code,
+                    "message": error_message,
+                },
+                "corr_id": corr_id,
+            }
+            yield f"event: error\ndata: {json.dumps(payload)}\n\n"
+            yield f"event: done\ndata: {json.dumps({'usage': {'tokens_in': 0, 'tokens_out': 0}, 'corr_id': corr_id})}\n\n"
+        async for chunk in _send_error():
+            yield chunk
+        return
     except LLMUnavailableError:
         async def _send_error() -> AsyncGenerator[str, None]:
             payload = {

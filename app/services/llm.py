@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
 from typing import Any, Dict, List, Optional, Tuple, cast
 from functools import partial
 
@@ -26,6 +27,114 @@ from app.services.runtime_config import get_llm_config, get_api_key
 _client_cache: dict[tuple[str | None, str | None], OpenAI] = {}
 logger = logging.getLogger(__name__)
 LLM_REQUEST_TIMEOUT = float(os.getenv("LLM_REQUEST_TIMEOUT", "60"))
+
+
+class LLMProviderError(Exception):
+    """Typed provider failure surfaced to chat routes with actionable messages."""
+
+    def __init__(
+        self,
+        code: str,
+        user_message: str,
+        *,
+        provider_message: str | None = None,
+        status_code: int = 503,
+    ) -> None:
+        super().__init__(provider_message or user_message)
+        self.code = code
+        self.user_message = user_message
+        self.provider_message = provider_message
+        self.status_code = status_code
+
+
+def _coerce_content_to_text(content: Any) -> str:
+    """Normalize OpenAI-compatible content shapes into plain text."""
+
+    if content is None:
+        return ""
+    if isinstance(content, str):
+        return content.strip()
+    if isinstance(content, list):
+        parts: list[str] = []
+        for part in content:
+            if isinstance(part, str):
+                parts.append(part)
+            elif isinstance(part, dict):
+                if part.get("type") == "text":
+                    parts.append(str(part.get("text") or ""))
+                elif "text" in part:
+                    parts.append(str(part.get("text") or ""))
+        return "".join(parts).strip()
+    return str(content).strip()
+
+
+def _split_thinking_content(text: str) -> tuple[str, str]:
+    if not text.lower().startswith("<think>"):
+        return text, ""
+
+    match = re.match(r"(?is)^<think>(.*?)</think>\s*(.*)$", text)
+    if match:
+        return match.group(2).strip(), match.group(1).strip()
+    return "", text
+
+
+def _extract_message_text(choice: Any, response: Any) -> tuple[str, dict[str, Any]]:
+    message = getattr(choice, "message", None)
+    text = _coerce_content_to_text(getattr(message, "content", None))
+    reasoning = _coerce_content_to_text(getattr(message, "reasoning_content", None))
+    text, inline_reasoning = _split_thinking_content(text)
+    if inline_reasoning:
+        reasoning = f"{reasoning}\n{inline_reasoning}".strip()
+    finish_reason = getattr(choice, "finish_reason", None)
+    usage = getattr(response, "usage", None)
+    completion_tokens = getattr(usage, "completion_tokens", 0) or 0
+    return text, {
+        "finish_reason": finish_reason,
+        "content_len": len(text),
+        "reasoning_len": len(reasoning),
+        "completion_tokens": completion_tokens,
+    }
+
+
+def _map_provider_exception(exc: Exception) -> LLMProviderError:
+    name = exc.__class__.__name__
+    msg = str(exc)
+    low = msg.lower()
+    if "timeout" in low or "timed out" in low or name in {"APITimeoutError", "ReadTimeout"}:
+        return LLMProviderError(
+            "LLM_TIMEOUT",
+            "Le modèle local met trop de temps à répondre. Essayez une question plus ciblée, ou demandez à un administrateur d'augmenter le timeout, de réduire top_k, ou de choisir un modèle plus rapide.",
+            provider_message=msg,
+        )
+    if "context" in low and ("exceed" in low or "too long" in low or "maximum" in low):
+        return LLMProviderError(
+            "LLM_CONTEXT_LIMIT",
+            "La requête dépasse la fenêtre de contexte du modèle. Essayez une question plus ciblée ou réduisez l'historique; un administrateur peut aussi baisser top_k ou activer un budget de contexte plus strict.",
+            provider_message=msg,
+        )
+    if "401" in msg or "unauthorized" in low or "api key" in low:
+        return LLMProviderError(
+            "LLM_AUTH_ERROR",
+            "Le fournisseur LLM refuse l'authentification. Demandez à un administrateur de vérifier la clé API configurée.",
+            provider_message=msg,
+        )
+    if "404" in msg or "not found" in low or "model" in low and "invalid" in low:
+        return LLMProviderError(
+            "LLM_INVALID_MODEL",
+            "Le modèle configuré est introuvable ou invalide. Demandez à un administrateur de vérifier le nom du modèle et l'endpoint.",
+            provider_message=msg,
+        )
+    if "connection" in low or "connect" in low or "refused" in low:
+        return LLMProviderError(
+            "LLM_PROVIDER_UNREACHABLE",
+            "Le serveur LLM local est inaccessible. Demandez à un administrateur de vérifier que le serveur est démarré et que la base URL est correcte.",
+            provider_message=msg,
+        )
+    return LLMProviderError(
+        "LLM_PROVIDER_ERROR",
+        "Le fournisseur LLM a retourné une erreur. Réessayez, ou contactez un administrateur avec l'identifiant de corrélation affiché.",
+        provider_message=msg,
+    )
 
 
 def _get_chat_client(provider: str, base_url: str | None, key: str | None) -> OpenAI | None:
@@ -87,9 +196,32 @@ async def generate_chat_completion(
             timeout=LLM_REQUEST_TIMEOUT,
         )
         if not response.choices:
-            return "", 0
+            raise LLMProviderError(
+                "LLM_EMPTY_RESPONSE",
+                "Le modèle n'a retourné aucun choix de réponse. Réessayez ou demandez à un administrateur de vérifier le modèle configuré.",
+            )
         choice = response.choices[0]
-        text = (choice.message.content or "").strip()
+        text, metrics = _extract_message_text(choice, response)
+        logger.info("LLM response metrics", extra=metrics)
+        if not text:
+            if metrics["reasoning_len"] > 0:
+                raise LLMProviderError(
+                    "LLM_REASONING_WITHOUT_ANSWER",
+                    "Le modèle a produit du raisonnement mais pas de réponse finale. Essayez une question plus courte; un administrateur peut augmenter le budget de sortie, réduire le contexte, ou configurer un modèle non-thinking.",
+                    provider_message=(
+                        f"finish_reason={metrics['finish_reason']} "
+                        f"completion_tokens={metrics['completion_tokens']} "
+                        f"reasoning_len={metrics['reasoning_len']}"
+                    ),
+                )
+            raise LLMProviderError(
+                "LLM_EMPTY_COMPLETION",
+                "Le modèle a retourné une réponse vide. Réessayez, ou demandez à un administrateur de vérifier le modèle et le budget de sortie.",
+                provider_message=(
+                    f"finish_reason={metrics['finish_reason']} "
+                    f"completion_tokens={metrics['completion_tokens']}"
+                ),
+            )
         completion_tokens = 0
         if getattr(response, "usage", None) is not None:
             completion_tokens = getattr(response.usage, "completion_tokens", 0) or 0
@@ -109,7 +241,20 @@ async def generate_chat_completion(
                 return models[0].id
             model_name = await loop.run_in_executor(None, _pick_model)
         return await loop.run_in_executor(None, partial(_call, model_name))
-    except Exception:
+    except LLMProviderError:
+        try:
+            cfg = await get_llm_config()
+            logger.exception(
+                "LLM provider error (provider=%s base_url=%s model=%s)",
+                cfg.provider,
+                cfg.base_url,
+                cfg.chat_model,
+            )
+        except Exception:
+            logger.exception("LLM provider error")
+        raise
+    except Exception as exc:
+        mapped = _map_provider_exception(exc)
         try:
             cfg = await get_llm_config()
             logger.exception(
@@ -120,7 +265,7 @@ async def generate_chat_completion(
             )
         except Exception:
             logger.exception("LLM chat completion failed")
-        return None
+        raise mapped
 
 
 async def test_chat_completion_provider(payload: LLMConfigTestRequest) -> tuple[bool, str | None]:

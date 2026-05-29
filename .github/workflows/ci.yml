@@ -44,6 +44,7 @@ jobs:
             app/services/embeddings.py \
             app/services/hybrid_retrieval.py \
             app/services/lexical_search.py \
+            app/services/llm.py \
             app/services/rags.py \
             app/services/runtime_config.py \
             app/services/vectorstore.py \
@@ -53,9 +54,20 @@ jobs:
             tests/test_embeddings_unit.py \
             tests/test_hybrid_retrieval_smoke.py \
             tests/test_hybrid_retrieval_unit.py \
+            tests/test_llm_unit.py \
             tests/test_opendocument_ingestion_unit.py \
+            tests/test_prompt_budget_unit.py \
             tests/test_rag_system_prompt_unit.py
           python -m compileall -q app tests scripts
+      - name: Prompt budget and LLM unit tests
+        env:
+          JWT_SECRET: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+          OPENAI_API_KEY: ""
+        run: |
+          pip install --no-cache-dir pytest
+          python -m pytest \
+            tests/test_llm_unit.py \
+            tests/test_prompt_budget_unit.py
       - name: RAG regression unit tests
         env:
           JWT_SECRET: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
