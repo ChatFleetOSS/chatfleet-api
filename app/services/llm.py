@@ -27,6 +27,11 @@ from app.services.runtime_config import get_llm_config, get_api_key
 _client_cache: dict[tuple[str | None, str | None], OpenAI] = {}
 logger = logging.getLogger(__name__)
 LLM_REQUEST_TIMEOUT = float(os.getenv("LLM_REQUEST_TIMEOUT", "60"))
+_LLAMACPP_CHANNEL_PREFIX_RE = re.compile(r"(?is)^\s*<\|channel\>\s*([a-z0-9_-]+)\s*")
+_LLAMACPP_CHANNEL_DELIMITER_RE = re.compile(r"(?is)<channel\|>")
+_LLAMACPP_LEADING_MARKERS_RE = re.compile(
+    r"(?is)^(?:\s*(?:<\|channel\>\s*[a-z0-9_-]+\s*|<channel\|>))+"
+)
 
 
 class LLMProviderError(Exception):
@@ -78,6 +83,33 @@ def _split_thinking_content(text: str) -> tuple[str, str]:
     return "", text
 
 
+def _split_llamacpp_channel_content(text: str) -> tuple[str, str]:
+    """Remove llama.cpp channel markers from visible assistant content."""
+
+    match = _LLAMACPP_CHANNEL_PREFIX_RE.match(text)
+    if not match:
+        return text, ""
+
+    channel = match.group(1).lower()
+    remaining = text[match.end():]
+    delimiter = _LLAMACPP_CHANNEL_DELIMITER_RE.search(remaining)
+    reasoning = ""
+    if delimiter:
+        before_delimiter = remaining[: delimiter.start()].strip()
+        if channel == "thought" and before_delimiter:
+            reasoning = before_delimiter
+        text = remaining[delimiter.end():]
+    else:
+        if channel == "thought":
+            reasoning = remaining.strip()
+            text = ""
+        else:
+            text = remaining
+
+    text = _LLAMACPP_LEADING_MARKERS_RE.sub("", text).strip()
+    return text, reasoning
+
+
 def _extract_message_text(choice: Any, response: Any) -> tuple[str, dict[str, Any]]:
     message = getattr(choice, "message", None)
     text = _coerce_content_to_text(getattr(message, "content", None))
@@ -85,6 +117,9 @@ def _extract_message_text(choice: Any, response: Any) -> tuple[str, dict[str, An
     text, inline_reasoning = _split_thinking_content(text)
     if inline_reasoning:
         reasoning = f"{reasoning}\n{inline_reasoning}".strip()
+    text, channel_reasoning = _split_llamacpp_channel_content(text)
+    if channel_reasoning:
+        reasoning = f"{reasoning}\n{channel_reasoning}".strip()
     finish_reason = getattr(choice, "finish_reason", None)
     usage = getattr(response, "usage", None)
     completion_tokens = getattr(usage, "completion_tokens", 0) or 0
