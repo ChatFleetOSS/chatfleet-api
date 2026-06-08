@@ -10,6 +10,7 @@ import logging
 import hashlib
 import chardet
 import json
+import os
 import re
 import zipfile
 import numpy as np
@@ -522,6 +523,28 @@ def _normalize_suggestions_list(candidates: List[str], limit: int = 6, max_len: 
         push(str(item))
 
     return out[:limit]
+
+
+def _env_flag_enabled(name: str, default: str = "1") -> bool:
+    return os.getenv(name, default).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _auto_suggestions_enabled() -> bool:
+    return _env_flag_enabled("CHATFLEET_AUTO_SUGGESTIONS", "1")
+
+
+def _fallback_suggestions(name: str, rag_slug: str) -> tuple[List[str], List[str]]:
+    base = name or rag_slug
+    return (
+        [
+            f"Peux-tu résumer rapidement {base} ?",
+            f"Comment démarrer avec {base} ?",
+        ],
+        [
+            f"Can you give a quick overview of {base}?",
+            f"How do I get started with {base}?",
+        ],
+    )
 
 
 async def _load_chunk_samples_for_suggestions(rag_slug: str, limit: int = 32, max_chars: int = 320) -> List[str]:
@@ -1086,29 +1109,26 @@ async def regenerate_suggestions_for_rag(rag_slug: str, force: bool = False, dry
     lang_primary = "fr"
     fallback_used = False
     try:
-        (
-            suggestions,
-            suggestions_en,
-            lang_primary,
-            suggestions_error,
-            fallback_used,
-        ) = await _generate_rag_suggestions(
-            rag_slug,
-            rag.get("name", rag_slug),
-            rag.get("description", ""),
-        )
-        if suggestions_error:
-            raise RuntimeError(suggestions_error)
+        if _auto_suggestions_enabled():
+            (
+                suggestions,
+                suggestions_en,
+                lang_primary,
+                suggestions_error,
+                fallback_used,
+            ) = await _generate_rag_suggestions(
+                rag_slug,
+                rag.get("name", rag_slug),
+                rag.get("description", ""),
+            )
+            if suggestions_error:
+                raise RuntimeError(suggestions_error)
+        else:
+            fallback_used = True
+            suggestions, suggestions_en = _fallback_suggestions(rag.get("name", rag_slug), rag_slug)
     except Exception as exc:
         fallback_used = True
-        suggestions = [
-            f"Peux-tu résumer rapidement {rag.get('name', rag_slug)} ?",
-            f"Comment démarrer avec {rag.get('name', rag_slug)} ?",
-        ]
-        suggestions_en = [
-            f"Can you give a quick overview of {rag.get('name', rag_slug)}?",
-            f"How do I get started with {rag.get('name', rag_slug)}?",
-        ]
+        suggestions, suggestions_en = _fallback_suggestions(rag.get("name", rag_slug), rag_slug)
         ingest_logger.warning("rag.suggestions.regenerate_failed rag=%s error=%s", rag_slug, exc, extra={"rag_slug": rag_slug})
         if dry_run:
             return SuggestionRegenerationResult(rag_slug, fallback_used, len(suggestions), len(suggestions_en))
@@ -1416,17 +1436,24 @@ async def upload_documents(
             lang_primary = "fr"
             suggestions_fallback = False
             try:
-                (
-                    suggestions,
-                    suggestions_en,
-                    lang_primary,
-                    suggestions_error,
-                    suggestions_fallback,
-                ) = await _generate_rag_suggestions(
-                    rag_slug,
-                    rag.get("name", rag_slug),
-                    rag.get("description", ""),
-                )
+                if _auto_suggestions_enabled():
+                    (
+                        suggestions,
+                        suggestions_en,
+                        lang_primary,
+                        suggestions_error,
+                        suggestions_fallback,
+                    ) = await _generate_rag_suggestions(
+                        rag_slug,
+                        rag.get("name", rag_slug),
+                        rag.get("description", ""),
+                    )
+                else:
+                    suggestions_fallback = True
+                    suggestions, suggestions_en = _fallback_suggestions(
+                        rag.get("name", rag_slug),
+                        rag_slug,
+                    )
             except Exception as exc:
                 suggestions_error = str(exc)
                 ingest_logger.warning(

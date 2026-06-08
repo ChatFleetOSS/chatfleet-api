@@ -9,6 +9,8 @@ import asyncio
 import hashlib
 import math
 import os
+import threading
+import time
 from typing import TYPE_CHECKING, Any, Iterable, List, cast
 
 import numpy as np
@@ -34,11 +36,42 @@ except ImportError:  # pragma: no cover - optional dependency
 
 _client_cache: dict[tuple[str | None, str | None], OpenAI] = {}
 _local_models: dict[str, "SentenceTransformer"] = {}
+_local_model_lock = threading.Lock()
+_local_embed_semaphore: tuple[int, asyncio.Semaphore] | None = None
 EMBED_DIM = 1536
 LOCAL_EMBED_MODEL_DEFAULT = "BAAI/bge-m3"
 LOCAL_EMBED_MODEL_DEFAULT_DIM = 1024
 logger = logging.getLogger("chatfleet.embeddings")
 logger.setLevel(logging.INFO)
+
+
+def _current_rss_mb() -> float | None:
+    try:
+        import resource
+
+        rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+        # Linux reports KB, macOS reports bytes.
+        if rss > 10_000_000:
+            return round(rss / (1024 * 1024), 2)
+        return round(rss / 1024, 2)
+    except Exception:
+        return None
+
+
+def _embed_concurrency_limit() -> int:
+    raw = os.getenv("CHATFLEET_EMBED_CONCURRENCY", "1")
+    try:
+        return max(1, int(raw))
+    except (TypeError, ValueError):
+        return 1
+
+
+def _get_local_embed_semaphore() -> asyncio.Semaphore:
+    global _local_embed_semaphore
+    limit = _embed_concurrency_limit()
+    if _local_embed_semaphore is None or _local_embed_semaphore[0] != limit:
+        _local_embed_semaphore = (limit, asyncio.Semaphore(limit))
+    return _local_embed_semaphore[1]
 
 
 def _get_embed_client(provider: str, base_url: str | None, key: str | None) -> OpenAI | None:
@@ -71,12 +104,25 @@ def _deterministic_embedding(text: str, dim: int = EMBED_DIM) -> List[float]:
 def _ensure_local_model(model_name: str) -> "SentenceTransformer" | None:
     if SentenceTransformer is None:
         return None
-    model = _local_models.get(model_name)
-    if model is not None:
+    with _local_model_lock:
+        model = _local_models.get(model_name)
+        if model is not None:
+            return model
+        rss_before = _current_rss_mb()
+        start = time.perf_counter()
+        model = SentenceTransformer(model_name)
+        _local_models[model_name] = model
+        logger.info(
+            "embeddings.local.model_loaded",
+            extra={
+                "pid": os.getpid(),
+                "model": model_name,
+                "elapsed_ms": round((time.perf_counter() - start) * 1000, 3),
+                "rss_before_mb": rss_before,
+                "rss_after_mb": _current_rss_mb(),
+            },
+        )
         return model
-    model = SentenceTransformer(model_name)
-    _local_models[model_name] = model
-    return model
 
 async def _embed_texts_local(texts: list[str], model_name: str) -> List[List[float]]:
     model = _ensure_local_model(model_name)
@@ -85,11 +131,26 @@ async def _embed_texts_local(texts: list[str], model_name: str) -> List[List[flo
     loop = asyncio.get_running_loop()
 
     def _call() -> List[List[float]]:
+        start = time.perf_counter()
         vecs = model.encode(texts, normalize_embeddings=True, convert_to_numpy=True)
         vecs = cast(Any, vecs).astype("float32")
+        logger.info(
+            "embeddings.local.encode",
+            extra={
+                "pid": os.getpid(),
+                "model": model_name,
+                "count": len(texts),
+                "dim": int(vecs.shape[1]) if getattr(vecs, "ndim", 0) == 2 else 0,
+                "elapsed_ms": round((time.perf_counter() - start) * 1000, 3),
+                "rss_mb": _current_rss_mb(),
+                "concurrency_limit": _embed_concurrency_limit(),
+            },
+        )
         return vecs.tolist()
 
-    return await loop.run_in_executor(None, _call)
+    semaphore = _get_local_embed_semaphore()
+    async with semaphore:
+        return await loop.run_in_executor(None, _call)
 
 
 def _fallback_dim(cfg) -> int:

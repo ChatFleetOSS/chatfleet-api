@@ -1,7 +1,13 @@
 FROM python:3.12-slim-bullseye AS base
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    PIP_DISABLE_PIP_VERSION_CHECK=1
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    TOKENIZERS_PARALLELISM=false \
+    OMP_NUM_THREADS=1 \
+    OPENBLAS_NUM_THREADS=1 \
+    MKL_NUM_THREADS=1 \
+    CHATFLEET_API_WORKERS=1 \
+    CHATFLEET_EMBED_CONCURRENCY=1
 ARG BUILD_VERSION=dev
 ARG BUILD_COMMIT=local
 ENV CHATFLEET_BUILD_VERSION=${BUILD_VERSION} \
@@ -30,4 +36,4 @@ RUN mkdir -p /var/lib/chatfleet/faiss /var/lib/chatfleet/uploads && \
 
 USER appuser
 EXPOSE 8000
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--proxy-headers", "--forwarded-allow-ips", "*"]
+CMD ["sh", "/app/docker-entrypoint.sh"]

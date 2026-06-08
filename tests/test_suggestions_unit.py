@@ -1,12 +1,16 @@
 import unittest
+import sys
+import importlib
 from unittest.mock import patch
 
-from app.services.rags import (
-    _clean_question,
-    _dedupe_questions,
-    _score_window_text,
-    _generate_rag_suggestions,
-)
+with patch.dict(sys.modules, {"sentence_transformers": None}):
+    rags = importlib.import_module("app.services.rags")
+    _auto_suggestions_enabled = rags._auto_suggestions_enabled
+    _clean_question = rags._clean_question
+    _dedupe_questions = rags._dedupe_questions
+    _fallback_suggestions = rags._fallback_suggestions
+    _score_window_text = rags._score_window_text
+    _generate_rag_suggestions = rags._generate_rag_suggestions
 from app.services.vectorstore import ChunkRecord
 
 
@@ -27,6 +31,13 @@ class SuggestionsUnitTest(unittest.IsolatedAsyncioTestCase):
         high = _score_window_text("Il est obligatoire de fournir un justificatif. Étape 1 : faire la demande.")
         self.assertGreater(high, low)
 
+    def test_auto_suggestions_can_be_disabled_by_env(self):
+        with patch.dict("os.environ", {"CHATFLEET_AUTO_SUGGESTIONS": "0"}):
+            self.assertFalse(_auto_suggestions_enabled())
+        primary, secondary = _fallback_suggestions("Documentation", "documentation")
+        self.assertGreaterEqual(len(primary), 1)
+        self.assertGreaterEqual(len(secondary), 1)
+
     async def test_generate_rag_suggestions_mocked(self):
         records = [
             ChunkRecord(doc_id="d1", filename="f", chunk_index=i, text=f"Remboursement obligatoire des frais de voyage {i}")
@@ -46,9 +57,9 @@ class SuggestionsUnitTest(unittest.IsolatedAsyncioTestCase):
             # deterministic simple vectors
             return [[float(i + 1)] * 4 for i, _ in enumerate(texts)]
 
-        with patch("app.services.rags.load_index", fake_load_index), patch(
-            "app.services.rags.generate_chat_completion", fake_generate_chat_completion
-        ), patch("app.services.rags.embed_texts", side_effect=fake_embed_texts):
+        with patch.object(rags, "load_index", fake_load_index), patch.object(
+            rags, "generate_chat_completion", fake_generate_chat_completion
+        ), patch.object(rags, "embed_texts", side_effect=fake_embed_texts):
             primary, suggestions_en, lang_primary, err, fb = await _generate_rag_suggestions(
                 "rag1", "rag1", "desc"
             )
