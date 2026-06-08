@@ -6,6 +6,7 @@ FastAPI application entrypoint for the ChatFleet backend (MVP v0.1.1).
 from __future__ import annotations
 
 import logging
+import os
 import sys
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -16,6 +17,7 @@ from app.core.database import get_client
 from app.core.mongo_launcher import ensure_local_mongo, stop_local_mongo
 from app.routes import register_routes
 from app.services.bootstrap import run_startup
+from app.services.runtime_config import get_llm_config
 from app.utils.error_handlers import install_error_handlers
 from app.utils.responses import UTF8JSONResponse
 
@@ -70,6 +72,24 @@ def create_app() -> FastAPI:
         logger.info("ChatFleet backend starting")
         await ensure_local_mongo()
         await run_startup()
+        try:
+            cfg = await get_llm_config()
+            try:
+                workers = int(os.getenv("CHATFLEET_API_WORKERS", "1") or "1")
+            except (TypeError, ValueError):
+                workers = 1
+            if workers > 1 and getattr(cfg, "embed_provider", "openai") == "local":
+                logger.warning(
+                    "Multiple API workers are configured while local embeddings are enabled; "
+                    "the embedding model is loaded per worker.",
+                    extra={
+                        "workers": workers,
+                        "embed_provider": cfg.embed_provider,
+                        "embed_model": cfg.embed_model,
+                    },
+                )
+        except Exception:
+            logger.exception("Unable to inspect worker/embedding runtime configuration")
 
     @app.on_event("shutdown")
     async def _shutdown() -> None:
