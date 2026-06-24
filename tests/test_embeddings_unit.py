@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import importlib
+import subprocess
 import sys
 import time
 import unittest
@@ -17,8 +18,12 @@ class EmbeddingsFallbackUnitTest(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
         embeddings._local_models.clear()
         embeddings._local_embed_semaphore = None
+        embeddings.SentenceTransformer = None
+        embeddings._sentence_transformer_import_error = None
 
-    async def test_local_provider_failure_keeps_runtime_embedding_dimension(self) -> None:
+    async def test_local_provider_failure_keeps_runtime_embedding_dimension(
+        self,
+    ) -> None:
         cfg = SimpleNamespace(
             provider="vllm",
             base_url="http://localhost:8001/v1",
@@ -119,6 +124,57 @@ class EmbeddingsFallbackUnitTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(created, 1)
         self.assertIs(loaded[0], loaded[1])
         self.assertIs(loaded[1], loaded[2])
+
+    async def test_local_provider_imports_sentence_transformers_lazily(self) -> None:
+        created = 0
+
+        class FakeSentenceTransformer:
+            def __init__(self, model_name: str):
+                nonlocal created
+                created += 1
+                self.model_name = model_name
+
+            def encode(self, texts, normalize_embeddings=True, convert_to_numpy=True):
+                return embeddings.np.ones((len(texts), 4), dtype="float32")
+
+        fake_module = SimpleNamespace(SentenceTransformer=FakeSentenceTransformer)
+        cfg = SimpleNamespace(
+            provider="vllm",
+            base_url="http://localhost:8001/v1",
+            embed_provider="local",
+            embed_model="fake-local",
+        )
+
+        with (
+            patch.object(embeddings, "get_llm_config", return_value=cfg),
+            patch.object(
+                embeddings.importlib,
+                "import_module",
+                return_value=fake_module,
+            ) as import_module,
+        ):
+            self.assertIsNone(embeddings.SentenceTransformer)
+            vectors = await embeddings.embed_texts(["hello"])
+
+        import_module.assert_called_once_with("sentence_transformers")
+        self.assertEqual(created, 1)
+        self.assertEqual(len(vectors[0]), 4)
+
+    def test_chat_import_does_not_import_sentence_transformers(self) -> None:
+        script = """
+import sys
+import app.services.vectorstore
+import app.services.chat
+print('sentence_transformers' in sys.modules)
+"""
+        result = subprocess.run(
+            [sys.executable, "-c", script],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+
+        self.assertEqual(result.stdout.strip(), "False")
 
 
 if __name__ == "__main__":

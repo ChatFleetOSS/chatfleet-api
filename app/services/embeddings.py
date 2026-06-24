@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import importlib
 import math
 import os
 import threading
@@ -29,13 +30,11 @@ try:
 except ImportError:  # pragma: no cover - optional dependency
     OpenAI = None  # type: ignore
 
-try:
-    from sentence_transformers import SentenceTransformer
-except ImportError:  # pragma: no cover - optional dependency
-    SentenceTransformer = None  # type: ignore
+SentenceTransformer: Any | None = None
+_sentence_transformer_import_error: Exception | None = None
 
 _client_cache: dict[tuple[str | None, str | None], OpenAI] = {}
-_local_models: dict[str, "SentenceTransformer"] = {}
+_local_models: dict[str, Any] = {}
 _local_model_lock = threading.Lock()
 _local_embed_semaphore: tuple[int, asyncio.Semaphore] | None = None
 EMBED_DIM = 1536
@@ -104,16 +103,35 @@ def _deterministic_embedding(text: str, dim: int = EMBED_DIM) -> List[float]:
     return (tiled / norm).tolist()
 
 
-def _ensure_local_model(model_name: str) -> "SentenceTransformer" | None:
-    if SentenceTransformer is None:
+def _get_sentence_transformer_class() -> Any | None:
+    """Import SentenceTransformer only when local embeddings are used."""
+
+    global SentenceTransformer, _sentence_transformer_import_error
+    if SentenceTransformer is not None:
+        return SentenceTransformer
+    if _sentence_transformer_import_error is not None:
         return None
+    try:
+        module = importlib.import_module("sentence_transformers")
+        SentenceTransformer = module.SentenceTransformer
+        return SentenceTransformer
+    except Exception as exc:  # pragma: no cover - depends on optional deps
+        _sentence_transformer_import_error = exc
+        logger.exception("embeddings.local.import_error")
+        return None
+
+
+def _ensure_local_model(model_name: str) -> Any | None:
     with _local_model_lock:
         model = _local_models.get(model_name)
         if model is not None:
             return model
+        sentence_transformer_cls = _get_sentence_transformer_class()
+        if sentence_transformer_cls is None:
+            return None
         rss_before = _current_rss_mb()
         start = time.perf_counter()
-        model = SentenceTransformer(model_name)
+        model = sentence_transformer_cls(model_name)
         _local_models[model_name] = model
         logger.info(
             "embeddings.local.model_loaded",
