@@ -74,7 +74,9 @@ def _get_local_embed_semaphore() -> asyncio.Semaphore:
     return _local_embed_semaphore[1]
 
 
-def _get_embed_client(provider: str, base_url: str | None, key: str | None) -> OpenAI | None:
+def _get_embed_client(
+    provider: str, base_url: str | None, key: str | None
+) -> OpenAI | None:
     if OpenAI is None:
         return None
     eff_key = key or ("sk-ignored" if provider == "vllm" else None)
@@ -101,6 +103,7 @@ def _deterministic_embedding(text: str, dim: int = EMBED_DIM) -> List[float]:
         return tiled.tolist()
     return (tiled / norm).tolist()
 
+
 def _ensure_local_model(model_name: str) -> "SentenceTransformer" | None:
     if SentenceTransformer is None:
         return None
@@ -123,6 +126,7 @@ def _ensure_local_model(model_name: str) -> "SentenceTransformer" | None:
             },
         )
         return model
+
 
 async def _embed_texts_local(texts: list[str], model_name: str) -> List[List[float]]:
     model = _ensure_local_model(model_name)
@@ -185,7 +189,9 @@ async def embed_texts(texts: Iterable[str]) -> List[List[float]]:
     if cfg is not None and getattr(cfg, "embed_provider", "openai") == "local":
         model_name = cfg.embed_model or LOCAL_EMBED_MODEL_DEFAULT
         try:
-            logger.info("embeddings.local", extra={"count": len(items), "model": model_name})
+            logger.info(
+                "embeddings.local", extra={"count": len(items), "model": model_name}
+            )
             vectors = await _embed_texts_local(items, model_name)
             logger.info(
                 "embeddings.local.ok",
@@ -209,7 +215,9 @@ async def embed_texts(texts: Iterable[str]) -> List[List[float]]:
     client = _get_embed_client(provider, base_url, key)
     if client is None:
         dim = _fallback_dim(cfg)
-        logger.warning("embeddings.fallback.deterministic", extra={"count": len(items), "dim": dim})
+        logger.warning(
+            "embeddings.fallback.deterministic", extra={"count": len(items), "dim": dim}
+        )
         vectors = [_deterministic_embedding(text, dim=dim) for text in items]
         logger.info(
             "embeddings.fallback.ok",
@@ -227,7 +235,9 @@ async def embed_texts(texts: Iterable[str]) -> List[List[float]]:
         cfg = cfg or await get_llm_config()
         if getattr(cfg, "embed_provider", "openai") == "local":
             model_name = cfg.embed_model or LOCAL_EMBED_MODEL_DEFAULT
-            logger.info("embeddings.local", extra={"count": len(items), "model": model_name})
+            logger.info(
+                "embeddings.local", extra={"count": len(items), "model": model_name}
+            )
             vectors = await _embed_texts_local(items, model_name)
             logger.info(
                 "embeddings.local.ok",
@@ -235,11 +245,21 @@ async def embed_texts(texts: Iterable[str]) -> List[List[float]]:
             )
             return vectors
         model_name = cfg.embed_model or settings.embed_model
-        logger.info("embeddings.remote", extra={"count": len(items), "model": model_name, "provider": cfg.provider})
+        logger.info(
+            "embeddings.remote",
+            extra={"count": len(items), "model": model_name, "provider": cfg.provider},
+        )
+        started = time.perf_counter()
         vectors = await loop.run_in_executor(None, lambda: _call(model_name))
         logger.info(
             "embeddings.remote.ok",
-            extra={"count": len(vectors), "dim": len(vectors[0]) if vectors else 0, "provider": cfg.provider},
+            extra={
+                "count": len(vectors),
+                "dim": len(vectors[0]) if vectors else 0,
+                "provider": cfg.provider,
+                "model": model_name,
+                "elapsed_ms": round((time.perf_counter() - started) * 1000.0, 3),
+            },
         )
         return vectors
     except Exception:
@@ -253,7 +273,9 @@ async def embed_text(text: str) -> List[float]:
     return vector
 
 
-async def test_embedding_provider(payload: "LLMConfigTestRequest") -> tuple[bool, str | None, int | None]:
+async def test_embedding_provider(
+    payload: "LLMConfigTestRequest",
+) -> tuple[bool, str | None, int | None]:
     """Verify the embeddings operation for the configured provider.
 
     Returns (ok, message, dim).
@@ -264,7 +286,9 @@ async def test_embedding_provider(payload: "LLMConfigTestRequest") -> tuple[bool
     except Exception:
         pass
 
-    embed_provider = payload.embed_provider or ("local" if payload.provider == "vllm" else "openai")
+    embed_provider = payload.embed_provider or (
+        "local" if payload.provider == "vllm" else "openai"
+    )
     if embed_provider == "local":
         model_name = payload.embed_model or LOCAL_EMBED_MODEL_DEFAULT
         try:

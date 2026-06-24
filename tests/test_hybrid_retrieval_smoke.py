@@ -11,6 +11,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from app.models.chat import ChatMessage, ChatRequest
+
 with patch.dict(sys.modules, {"sentence_transformers": None}):
     from app.services import chat
 from app.services import lexical_search, vectorstore
@@ -241,7 +242,10 @@ class HybridRetrievalSmokeTest(unittest.IsolatedAsyncioTestCase):
             async for event in chat.stream_chat(request, user_id="smoke-user"):
                 events.append(event)
 
-        citation_events = [event for event in events if event.startswith("event: citations")]
+        citation_events = [
+            event for event in events if event.startswith("event: citations")
+        ]
+        self.assertTrue(events[0].startswith("event: ready"))
         self.assertEqual(len(citation_events), 1)
         payload = citation_events[0].split("data: ", 1)[1].strip()
         citations = json.loads(payload)["citations"]
@@ -261,6 +265,32 @@ class HybridRetrievalSmokeTest(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(result.hits)
         elapsed = time.perf_counter() - start
         self.assertLess(elapsed, 1.0)
+
+    def test_faiss_index_cache_reuses_loaded_index_and_invalidates_on_metadata_change(
+        self,
+    ) -> None:
+        with patch.object(
+            vectorstore.faiss,
+            "read_index",
+            wraps=vectorstore.faiss.read_index,
+        ) as read_index:
+            self.assertTrue(
+                query_index(RAG_SLUG, QUERY_SEMANTIC_LEAVE, top_k=1, min_score=0.2)
+            )
+            self.assertTrue(
+                query_index(RAG_SLUG, QUERY_SEMANTIC_LEAVE, top_k=1, min_score=0.2)
+            )
+            self.assertEqual(read_index.call_count, 1)
+
+            metadata_path = self.index_dir / RAG_SLUG / vectorstore.METADATA_FILE
+            entries = json.loads(metadata_path.read_text(encoding="utf-8"))
+            entries[0]["text"] = entries[0]["text"] + " Cache invalidation marker."
+            metadata_path.write_text(json.dumps(entries), encoding="utf-8")
+
+            self.assertTrue(
+                query_index(RAG_SLUG, QUERY_SEMANTIC_LEAVE, top_k=1, min_score=0.2)
+            )
+            self.assertEqual(read_index.call_count, 2)
 
     def test_lexical_prewarm_runs_only_when_enabled(self) -> None:
         with (

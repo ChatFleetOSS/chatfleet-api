@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import logging
 import pickle
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, List, Optional, Sequence
@@ -15,7 +16,10 @@ from typing import Any, List, Optional, Sequence
 import faiss
 import numpy as np
 
-from app.services.runtime_config import get_retrieval_config_sync, get_runtime_overrides_sync
+from app.services.runtime_config import (
+    get_retrieval_config_sync,
+    get_runtime_overrides_sync,
+)
 
 logger = logging.getLogger("chatfleet.vectorstore")
 logger.setLevel(logging.INFO)
@@ -23,6 +27,22 @@ logger.setLevel(logging.INFO)
 DOC_BUCKET = "docs"
 INDEX_FILE = "index.faiss"
 METADATA_FILE = "metadata.json"
+
+
+@dataclass(frozen=True)
+class _IndexSignature:
+    index_path: Path
+    index_mtime_ns: int
+    index_size: int
+    metadata_path: Path
+    metadata_mtime_ns: int
+    metadata_size: int
+
+
+_INDEX_CACHE: dict[
+    str, tuple[_IndexSignature, faiss.IndexFlatIP, List["ChunkRecord"]]
+] = {}
+_INDEX_CACHE_LOCK = threading.Lock()
 
 
 @dataclass
@@ -41,6 +61,24 @@ def _rag_base_dir(rag_slug: str) -> Path:
     base.mkdir(parents=True, exist_ok=True)
     (base / DOC_BUCKET).mkdir(parents=True, exist_ok=True)
     return base
+
+
+def _clear_index_cache(rag_slug: str) -> None:
+    with _INDEX_CACHE_LOCK:
+        _INDEX_CACHE.pop(rag_slug, None)
+
+
+def _index_signature(index_path: Path, metadata_path: Path) -> _IndexSignature:
+    index_stat = index_path.stat()
+    metadata_stat = metadata_path.stat()
+    return _IndexSignature(
+        index_path=index_path,
+        index_mtime_ns=index_stat.st_mtime_ns,
+        index_size=index_stat.st_size,
+        metadata_path=metadata_path,
+        metadata_mtime_ns=metadata_stat.st_mtime_ns,
+        metadata_size=metadata_stat.st_size,
+    )
 
 
 def persist_doc_payload(
@@ -164,6 +202,7 @@ def build_index(rag_slug: str) -> tuple[int, int]:
             index_path.unlink()
         if metadata_path.exists():
             metadata_path.unlink()
+        _clear_index_cache(rag_slug)
         return 0, 0
 
     # Enforce homogeneous dimensions across all vectors
@@ -185,6 +224,7 @@ def build_index(rag_slug: str) -> tuple[int, int]:
             handle,
             ensure_ascii=False,
         )
+    _clear_index_cache(rag_slug)
 
     logger.info(
         "rag.index.build rag=%s vectors=%s dim=%s docs=%s",
@@ -233,6 +273,18 @@ def load_index(rag_slug: str) -> tuple[faiss.IndexFlatIP, List[ChunkRecord]]:
             f"Index not built for rag '{rag_slug}' "
             f"(expected index={index_path}, metadata={metadata_path})"
         )
+    signature = _index_signature(index_path, metadata_path)
+    with _INDEX_CACHE_LOCK:
+        cached = _INDEX_CACHE.get(rag_slug)
+        if cached and cached[0] == signature:
+            logger.info(
+                "rag.index.cache_hit rag=%s vectors=%s",
+                rag_slug,
+                len(cached[2]),
+                extra={"rag_slug": rag_slug, "vectors": len(cached[2])},
+            )
+            return cached[1], cached[2]
+
     index = faiss.read_index(str(index_path))
     with metadata_path.open("r", encoding="utf-8") as handle:
         entries = json.load(handle)
@@ -247,6 +299,14 @@ def load_index(rag_slug: str) -> tuple[faiss.IndexFlatIP, List[ChunkRecord]]:
         )
         for item in entries
     ]
+    with _INDEX_CACHE_LOCK:
+        _INDEX_CACHE[rag_slug] = (signature, index, records)
+    logger.info(
+        "rag.index.cache_load rag=%s vectors=%s",
+        rag_slug,
+        len(records),
+        extra={"rag_slug": rag_slug, "vectors": len(records)},
+    )
     return index, records
 
 
@@ -263,7 +323,9 @@ def query_index(
     if k == 0:
         return []
     distances, indices = index.search(vector, k)
-    raw_scores = distances[0].tolist() if hasattr(distances[0], "tolist") else list(distances[0])
+    raw_scores = (
+        distances[0].tolist() if hasattr(distances[0], "tolist") else list(distances[0])
+    )
     hits: List[tuple[float, ChunkRecord]] = []
     for score, idx in zip(distances[0], indices[0]):
         if idx < 0 or idx >= len(metadata):

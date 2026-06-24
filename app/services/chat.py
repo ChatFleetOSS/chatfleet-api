@@ -10,6 +10,8 @@ import json
 import logging
 import os
 import re
+import time
+from dataclasses import replace
 from typing import Any, AsyncGenerator, Dict, List, Sequence, Tuple
 from uuid import uuid4
 
@@ -20,7 +22,11 @@ from app.models.chat import ChatRequest, ChatResponse, Citation, Usage
 from app.models.rag import normalize_rag_system_prompt
 from app.services.embeddings import embed_text
 from app.models.admin import RetrievalConfig
-from app.services.hybrid_retrieval import HybridRetrievalResult, hybrid_retrieve, chunk_key
+from app.services.hybrid_retrieval import (
+    HybridRetrievalResult,
+    hybrid_retrieve,
+    chunk_key,
+)
 from app.services.jobs import JobRecord, job_manager
 from app.services.llm import LLMProviderError, generate_chat_completion
 from app.services.runtime_config import get_llm_config, get_api_key
@@ -72,7 +78,9 @@ def _format_hits_for_prompt(hits: Sequence[tuple[float, ChunkRecord]]) -> str:
     return "\n\n".join(lines)
 
 
-def _format_hits_clean(hits: Sequence[tuple[float, ChunkRecord]], limit: int = 6) -> str:
+def _format_hits_clean(
+    hits: Sequence[tuple[float, ChunkRecord]], limit: int = 6
+) -> str:
     """Clean formatter for the model: only text, simple delimiters."""
     extracts: List[str] = []
     for idx, (_, record) in enumerate(hits[:limit], start=1):
@@ -82,7 +90,9 @@ def _format_hits_clean(hits: Sequence[tuple[float, ChunkRecord]], limit: int = 6
     return "\n\n".join(extracts)
 
 
-def _preview_hits(hits: Sequence[tuple[float, ChunkRecord]], limit: int = 3) -> List[Dict[str, Any]]:
+def _preview_hits(
+    hits: Sequence[tuple[float, ChunkRecord]], limit: int = 3
+) -> List[Dict[str, Any]]:
     previews: List[Dict[str, Any]] = []
     for score, record in hits[:limit]:
         snippet = record.text.replace("\n", " ").strip()
@@ -118,7 +128,12 @@ def _truncate_text_to_tokens(text: str, token_budget: int) -> str:
 
 def _available_context_tokens(instruction_text: str, question: str) -> int:
     static_tokens = _estimate_tokens(instruction_text) + _estimate_tokens(question)
-    available = PROMPT_TOKEN_BUDGET - OUTPUT_TOKEN_RESERVE - static_tokens - HISTORY_TOKEN_BUDGET
+    available = (
+        PROMPT_TOKEN_BUDGET
+        - OUTPUT_TOKEN_RESERVE
+        - static_tokens
+        - HISTORY_TOKEN_BUDGET
+    )
     return max(MIN_CONTEXT_TOKEN_BUDGET, min(CONTEXT_TOKEN_BUDGET, available))
 
 
@@ -187,7 +202,9 @@ def _log_no_context(
     result: HybridRetrievalResult,
     stream: bool = False,
 ) -> None:
-    event = "chat.retrieval.no_context.stream" if stream else "chat.retrieval.no_context"
+    event = (
+        "chat.retrieval.no_context.stream" if stream else "chat.retrieval.no_context"
+    )
     retrieval_logger.warning(
         event,
         extra={
@@ -205,7 +222,9 @@ def _log_no_context(
     )
 
 
-def _has_query_overlap(question: str, hits: Sequence[tuple[float, ChunkRecord]]) -> bool:
+def _has_query_overlap(
+    question: str, hits: Sequence[tuple[float, ChunkRecord]]
+) -> bool:
     """Check if at least one query token appears in the retrieved snippets."""
     tokens = set(re.findall(r"\b\w{4,}\b", question.lower()))
     if not tokens:
@@ -223,7 +242,7 @@ def _log_prompt_messages(messages: List[Dict[str, str]], rag_slug: str) -> None:
         preview: List[str] = []
         for idx, msg in enumerate(messages):
             content = msg.get("content", "")
-            preview.append(f"[{idx}:{msg.get('role','?')}] {content}")
+            preview.append(f"[{idx}:{msg.get('role', '?')}] {content}")
         prompt_logger.info(
             "chat.prompt.final corr_id=%s rag=%s count=%s\n%s",
             corr_id,
@@ -305,7 +324,9 @@ def _strip_sources_section(text: str) -> str:
     result: List[str] = []
     skipping = False
     pattern_heading = re.compile(r"^#{1,6}\s*Sources\b", flags=re.IGNORECASE)
-    pattern_unavailable = re.compile(r"^\*?\s*Sources\s+indisponibles\.?\s*\*?$", flags=re.IGNORECASE)
+    pattern_unavailable = re.compile(
+        r"^\*?\s*Sources\s+indisponibles\.?\s*\*?$", flags=re.IGNORECASE
+    )
 
     for line in lines:
         stripped = line.strip()
@@ -360,9 +381,15 @@ def _ensure_paragraph_spacing(text: str) -> str:
                 result.append("")
             elif line_type == "paragraph" and prev_type != "paragraph":
                 result.append("")
-            elif line_type in {"ulist", "olist"} and prev_type not in {line_type, "blank"}:
+            elif line_type in {"ulist", "olist"} and prev_type not in {
+                line_type,
+                "blank",
+            }:
                 result.append("")
-            elif line_type in {"heading", "block"} and prev_type not in {line_type, "blank"}:
+            elif line_type in {"heading", "block"} and prev_type not in {
+                line_type,
+                "blank",
+            }:
                 result.append("")
         result.append(line)
         prev_type = line_type
@@ -478,7 +505,9 @@ def _validate_chat_request_shape(request: ChatRequest) -> None:
         )
 
 
-def _build_citations_from_hits(hits: Sequence[tuple[float, ChunkRecord]]) -> List[Citation]:
+def _build_citations_from_hits(
+    hits: Sequence[tuple[float, ChunkRecord]],
+) -> List[Citation]:
     citations: List[Citation] = []
     seen: set[str] = set()
     for _, record in hits:
@@ -511,7 +540,10 @@ async def _retrieve_hits(
     top_k: int,
     retrieval_config: RetrievalConfig | None = None,
 ) -> HybridRetrievalResult:
+    started = time.perf_counter()
+    embedding_started = time.perf_counter()
     vector = await embed_text(question)
+    embedding_ms = (time.perf_counter() - embedding_started) * 1000.0
     loop = asyncio.get_running_loop()
 
     def _query() -> HybridRetrievalResult:
@@ -521,12 +553,21 @@ async def _retrieve_hits(
             question,
             top_k,
             min_semantic_score=(
-                retrieval_config.semantic_min_score if retrieval_config else RETRIEVAL_MIN_SCORE
+                retrieval_config.semantic_min_score
+                if retrieval_config
+                else RETRIEVAL_MIN_SCORE
             ),
             retrieval_config=retrieval_config,
         )
 
-    return await loop.run_in_executor(None, _query)
+    result = await loop.run_in_executor(None, _query)
+    total_ms = (time.perf_counter() - started) * 1000.0
+    diagnostics = replace(
+        result.diagnostics,
+        embedding_ms=round(embedding_ms, 3),
+        retrieval_ms=round(total_ms, 3),
+    )
+    return HybridRetrievalResult(hits=result.hits, diagnostics=diagnostics)
 
 
 async def _generate_answer_with_job(
@@ -559,7 +600,9 @@ async def _generate_answer(
     hits: Sequence[tuple[float, ChunkRecord]],
     system_prompt: str | None = None,
 ) -> Tuple[str, int]:
+    prompt_started = time.perf_counter()
     messages = _build_prompt_messages(request, hits, system_prompt)
+    prompt_build_ms = (time.perf_counter() - prompt_started) * 1000.0
     _log_prompt_messages(messages, request.rag_slug)
     # prefer runtime default
     cfg = await get_llm_config()
@@ -572,11 +615,25 @@ async def _generate_answer(
         request.opts.max_tokens if request.opts and request.opts.max_tokens else 1200
     )
 
-    llm_result = await generate_chat_completion(
-        messages,
-        temperature=temperature,
-        max_tokens=max_tokens,
-    )
+    llm_started = time.perf_counter()
+    try:
+        llm_result = await generate_chat_completion(
+            messages,
+            temperature=temperature,
+            max_tokens=max_tokens,
+        )
+    finally:
+        logger.info(
+            "chat.llm.timing",
+            extra={
+                "corr_id": get_corr_id(),
+                "rag_slug": request.rag_slug,
+                "prompt_build_ms": round(prompt_build_ms, 3),
+                "llm_ms": round((time.perf_counter() - llm_started) * 1000.0, 3),
+                "temperature": temperature,
+                "max_tokens": max_tokens,
+            },
+        )
     if llm_result is not None:
         answer_text, tokens_out = llm_result
         answer_text = _normalize_markdown_tables(answer_text)
@@ -591,6 +648,7 @@ async def _ensure_llm_configured() -> bool:
     if cfg.provider == "openai":
         key = await get_api_key()
         import os
+
         return bool(key or os.getenv("OPENAI_API_KEY"))
     if cfg.provider == "vllm":
         return bool(cfg.base_url)
@@ -598,6 +656,7 @@ async def _ensure_llm_configured() -> bool:
 
 
 async def handle_chat(request: ChatRequest, user_id: str) -> ChatResponse:
+    request_started = time.perf_counter()
     _validate_chat_request_shape(request)
     # Used only by provider verification so CI does not depend on an external LLM.
     if os.getenv("CHATFLEET_FAKE_CHAT_MODE") == "1":
@@ -625,14 +684,20 @@ async def handle_chat(request: ChatRequest, user_id: str) -> ChatResponse:
         )
     rag = await get_rag_by_slug(request.rag_slug)
     if not rag:
-        raise_http_error("RAG_NOT_FOUND", f"RAG '{request.rag_slug}' not found", status_code=404)
+        raise_http_error(
+            "RAG_NOT_FOUND", f"RAG '{request.rag_slug}' not found", status_code=404
+        )
 
     cfg = await get_llm_config()
     retrieval_config = getattr(cfg, "retrieval", None)
-    top_k = request.opts.top_k if request.opts and request.opts.top_k else cfg.top_k_default
+    top_k = (
+        request.opts.top_k if request.opts and request.opts.top_k else cfg.top_k_default
+    )
     last_message = request.messages[-1]
     question = last_message.content
-    retrieval_result = await _retrieve_hits(request.rag_slug, question, top_k, retrieval_config)
+    retrieval_result = await _retrieve_hits(
+        request.rag_slug, question, top_k, retrieval_config
+    )
     hits = retrieval_result.hits
     if not hits:
         _log_no_context(
@@ -658,11 +723,19 @@ async def handle_chat(request: ChatRequest, user_id: str) -> ChatResponse:
             "retrieval_mode": retrieval_config.mode if retrieval_config else "hybrid",
             "top_k": top_k,
             "min_score": (
-                retrieval_config.semantic_min_score if retrieval_config else RETRIEVAL_MIN_SCORE
+                retrieval_config.semantic_min_score
+                if retrieval_config
+                else RETRIEVAL_MIN_SCORE
             ),
             "semantic_hit_count": retrieval_result.diagnostics.semantic_count,
             "lexical_hit_count": retrieval_result.diagnostics.lexical_count,
             "final_hit_count": retrieval_result.diagnostics.final_count,
+            "candidate_k": retrieval_result.diagnostics.candidate_k,
+            "embedding_ms": retrieval_result.diagnostics.embedding_ms,
+            "semantic_ms": retrieval_result.diagnostics.semantic_ms,
+            "lexical_ms": retrieval_result.diagnostics.lexical_ms,
+            "fusion_ms": retrieval_result.diagnostics.fusion_ms,
+            "retrieval_ms": retrieval_result.diagnostics.retrieval_ms,
             "hit_count": len(hits),
             "hits": _retrieval_hit_details(retrieval_result),
             "hit_previews": _preview_hits(hits),
@@ -711,7 +784,11 @@ async def handle_chat(request: ChatRequest, user_id: str) -> ChatResponse:
             status.HTTP_503_SERVICE_UNAVAILABLE,
         )
     except Exception:
-        raise_http_error("CHAT_FAILED", "Unable to generate an answer at this time", status.HTTP_503_SERVICE_UNAVAILABLE)
+        raise_http_error(
+            "CHAT_FAILED",
+            "Unable to generate an answer at this time",
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+        )
 
     citations = _build_citations_from_hits(hits)
     usage = Usage(
@@ -719,7 +796,20 @@ async def handle_chat(request: ChatRequest, user_id: str) -> ChatResponse:
         tokens_out=tokens_out,
     )
     corr_id = get_corr_id()
-    response = ChatResponse(answer=answer, citations=citations, usage=usage, corr_id=corr_id)
+    response = ChatResponse(
+        answer=answer, citations=citations, usage=usage, corr_id=corr_id
+    )
+    logger.info(
+        "chat.completion.timing",
+        extra={
+            "corr_id": corr_id,
+            "rag_slug": request.rag_slug,
+            "total_ms": round((time.perf_counter() - request_started) * 1000.0, 3),
+            "embedding_ms": retrieval_result.diagnostics.embedding_ms,
+            "retrieval_ms": retrieval_result.diagnostics.retrieval_ms,
+            "tokens_out": tokens_out,
+        },
+    )
 
     await write_system_log(
         event="chat.completion",
@@ -735,6 +825,7 @@ async def handle_chat(request: ChatRequest, user_id: str) -> ChatResponse:
 
 
 async def stream_chat(request: ChatRequest, user_id: str) -> AsyncGenerator[str, None]:
+    request_started = time.perf_counter()
     _validate_chat_request_shape(request)
     if not await _ensure_llm_configured():
         raise_http_error(
@@ -744,14 +835,20 @@ async def stream_chat(request: ChatRequest, user_id: str) -> AsyncGenerator[str,
         )
     rag = await get_rag_by_slug(request.rag_slug)
     if not rag:
-        raise_http_error("RAG_NOT_FOUND", f"RAG '{request.rag_slug}' not found", status_code=404)
+        raise_http_error(
+            "RAG_NOT_FOUND", f"RAG '{request.rag_slug}' not found", status_code=404
+        )
 
     corr_id = get_corr_id()
     question = request.messages[-1].content
     cfg = await get_llm_config()
     retrieval_config = getattr(cfg, "retrieval", None)
-    top_k = request.opts.top_k if request.opts and request.opts.top_k else cfg.top_k_default
-    retrieval_result = await _retrieve_hits(request.rag_slug, question, top_k, retrieval_config)
+    top_k = (
+        request.opts.top_k if request.opts and request.opts.top_k else cfg.top_k_default
+    )
+    retrieval_result = await _retrieve_hits(
+        request.rag_slug, question, top_k, retrieval_config
+    )
     hits = retrieval_result.hits
     if not hits:
         _log_no_context(
@@ -763,6 +860,7 @@ async def stream_chat(request: ChatRequest, user_id: str) -> AsyncGenerator[str,
             result=retrieval_result,
             stream=True,
         )
+
         async def _send_error() -> AsyncGenerator[str, None]:
             payload = {
                 "error": {
@@ -773,10 +871,24 @@ async def stream_chat(request: ChatRequest, user_id: str) -> AsyncGenerator[str,
             }
             yield f"event: error\ndata: {json.dumps(payload)}\n\n"
             yield f"event: done\ndata: {json.dumps({'usage': {'tokens_in': 0, 'tokens_out': 0}, 'corr_id': corr_id})}\n\n"
+
         async for chunk in _send_error():
             yield chunk
         return
     context_hits = list(_truncate_context(hits))
+
+    async def send(event: str, payload: Any) -> str:
+        if payload is None:
+            data: Any = {}
+        elif isinstance(payload, dict):
+            data = dict(payload)
+        else:
+            data = payload
+
+        if isinstance(data, dict) and event != "ping":
+            data.setdefault("corr_id", corr_id)
+        return f"event: {event}\ndata: {json.dumps(data)}\n\n"
+
     logger.info(
         "chat.retrieval.stream",
         extra={
@@ -785,11 +897,19 @@ async def stream_chat(request: ChatRequest, user_id: str) -> AsyncGenerator[str,
             "retrieval_mode": retrieval_config.mode if retrieval_config else "hybrid",
             "top_k": top_k,
             "min_score": (
-                retrieval_config.semantic_min_score if retrieval_config else RETRIEVAL_MIN_SCORE
+                retrieval_config.semantic_min_score
+                if retrieval_config
+                else RETRIEVAL_MIN_SCORE
             ),
             "semantic_hit_count": retrieval_result.diagnostics.semantic_count,
             "lexical_hit_count": retrieval_result.diagnostics.lexical_count,
             "final_hit_count": retrieval_result.diagnostics.final_count,
+            "candidate_k": retrieval_result.diagnostics.candidate_k,
+            "embedding_ms": retrieval_result.diagnostics.embedding_ms,
+            "semantic_ms": retrieval_result.diagnostics.semantic_ms,
+            "lexical_ms": retrieval_result.diagnostics.lexical_ms,
+            "fusion_ms": retrieval_result.diagnostics.fusion_ms,
+            "retrieval_ms": retrieval_result.diagnostics.retrieval_ms,
             "hit_count": len(hits),
             "hits": _retrieval_hit_details(retrieval_result),
             "hit_previews": _preview_hits(hits),
@@ -819,6 +939,13 @@ async def stream_chat(request: ChatRequest, user_id: str) -> AsyncGenerator[str,
         )
     except Exception:
         pass
+    yield await send(
+        "ready",
+        {
+            "corr_id": corr_id,
+            "retrieval_ms": retrieval_result.diagnostics.retrieval_ms,
+        },
+    )
     try:
         answer, tokens_out = await _generate_answer_with_job(
             request,
@@ -839,10 +966,12 @@ async def stream_chat(request: ChatRequest, user_id: str) -> AsyncGenerator[str,
             }
             yield f"event: error\ndata: {json.dumps(payload)}\n\n"
             yield f"event: done\ndata: {json.dumps({'usage': {'tokens_in': 0, 'tokens_out': 0}, 'corr_id': corr_id})}\n\n"
+
         async for chunk in _send_error():
             yield chunk
         return
     except LLMUnavailableError:
+
         async def _send_error() -> AsyncGenerator[str, None]:
             payload = {
                 "error": {
@@ -853,10 +982,12 @@ async def stream_chat(request: ChatRequest, user_id: str) -> AsyncGenerator[str,
             }
             yield f"event: error\ndata: {json.dumps(payload)}\n\n"
             yield f"event: done\ndata: {json.dumps({'usage': {'tokens_in': 0, 'tokens_out': 0}, 'corr_id': corr_id})}\n\n"
+
         async for chunk in _send_error():
             yield chunk
         return
     except Exception:
+
         async def _send_error() -> AsyncGenerator[str, None]:
             payload = {
                 "error": {
@@ -867,6 +998,7 @@ async def stream_chat(request: ChatRequest, user_id: str) -> AsyncGenerator[str,
             }
             yield f"event: error\ndata: {json.dumps(payload)}\n\n"
             yield f"event: done\ndata: {json.dumps({'usage': {'tokens_in': 0, 'tokens_out': 0}, 'corr_id': corr_id})}\n\n"
+
         async for chunk in _send_error():
             yield chunk
         return
@@ -874,20 +1006,6 @@ async def stream_chat(request: ChatRequest, user_id: str) -> AsyncGenerator[str,
     segments = _split_markdown_segments(answer)
     if not segments:
         segments = [answer]
-
-    async def send(event: str, payload: Any) -> str:
-        if payload is None:
-            data: Any = {}
-        elif isinstance(payload, dict):
-            data = dict(payload)
-        else:
-            data = payload
-
-        if isinstance(data, dict) and event != "ping":
-            data.setdefault("corr_id", corr_id)
-        return f"event: {event}\ndata: {json.dumps(data)}\n\n"
-
-    yield await send("ready", {"corr_id": corr_id})
     for chunk in segments:
         await asyncio.sleep(0.05)
         yield await send("chunk", {"delta": chunk})
@@ -900,6 +1018,18 @@ async def stream_chat(request: ChatRequest, user_id: str) -> AsyncGenerator[str,
     }
     yield await send("done", {"usage": usage})
     yield await send("ping", {})
+    logger.info(
+        "chat.stream.timing",
+        extra={
+            "corr_id": corr_id,
+            "rag_slug": request.rag_slug,
+            "total_ms": round((time.perf_counter() - request_started) * 1000.0, 3),
+            "embedding_ms": retrieval_result.diagnostics.embedding_ms,
+            "retrieval_ms": retrieval_result.diagnostics.retrieval_ms,
+            "tokens_out": tokens_out,
+            "chunks": len(segments),
+        },
+    )
 
     await write_system_log(
         event="chat.stream",

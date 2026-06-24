@@ -6,6 +6,7 @@ Hybrid RAG retrieval using semantic FAISS hits plus local BM25 hits.
 from __future__ import annotations
 
 import logging
+import time
 from dataclasses import dataclass
 from typing import Callable, Sequence
 
@@ -36,6 +37,12 @@ class HybridDiagnostics:
     lexical_ranks: dict[ChunkKey, int]
     index_missing: bool = False
     index_error: str | None = None
+    candidate_k: int = 0
+    semantic_ms: float = 0.0
+    lexical_ms: float = 0.0
+    fusion_ms: float = 0.0
+    retrieval_ms: float = 0.0
+    embedding_ms: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -122,11 +129,13 @@ def hybrid_retrieve(
     semantic candidate list is returned unchanged as the compatibility fallback.
     """
 
+    started = time.perf_counter()
     cfg = retrieval_config or get_retrieval_config_sync()
     effective_min_score = (
         cfg.semantic_min_score if min_semantic_score is None else min_semantic_score
     )
     candidate_k = max(top_k * cfg.candidate_multiplier, cfg.candidate_min)
+    semantic_started = time.perf_counter()
     try:
         semantic_hits = semantic_search(
             rag_slug,
@@ -135,6 +144,7 @@ def hybrid_retrieve(
             effective_min_score,
         )
     except FileNotFoundError as exc:
+        semantic_ms = (time.perf_counter() - semantic_started) * 1000.0
         logger.warning(
             "rag.hybrid.index_missing rag=%s error=%s",
             rag_slug,
@@ -151,8 +161,12 @@ def hybrid_retrieve(
                 lexical_ranks={},
                 index_missing=True,
                 index_error=str(exc),
+                candidate_k=candidate_k,
+                semantic_ms=round(semantic_ms, 3),
+                retrieval_ms=round((time.perf_counter() - started) * 1000.0, 3),
             ),
         )
+    semantic_ms = (time.perf_counter() - semantic_started) * 1000.0
 
     if cfg.mode == "semantic":
         final_hits = semantic_hits[: max(top_k, 0)]
@@ -164,9 +178,13 @@ def hybrid_retrieve(
                 final_count=len(final_hits),
                 semantic_ranks=_rank_map(semantic_hits),
                 lexical_ranks={},
+                candidate_k=candidate_k,
+                semantic_ms=round(semantic_ms, 3),
+                retrieval_ms=round((time.perf_counter() - started) * 1000.0, 3),
             ),
         )
 
+    lexical_started = time.perf_counter()
     try:
         lexical_hits = lexical_search(
             rag_slug,
@@ -178,6 +196,7 @@ def hybrid_retrieve(
     except FileNotFoundError:
         lexical_hits = []
     except Exception:
+        lexical_ms = (time.perf_counter() - lexical_started) * 1000.0
         logger.exception(
             "rag.hybrid.lexical_failed rag=%s fallback=semantic_only",
             rag_slug,
@@ -192,9 +211,15 @@ def hybrid_retrieve(
                 final_count=len(final_hits),
                 semantic_ranks=_rank_map(semantic_hits),
                 lexical_ranks={},
+                candidate_k=candidate_k,
+                semantic_ms=round(semantic_ms, 3),
+                lexical_ms=round(lexical_ms, 3),
+                retrieval_ms=round((time.perf_counter() - started) * 1000.0, 3),
             ),
         )
+    lexical_ms = (time.perf_counter() - lexical_started) * 1000.0
 
+    fusion_started = time.perf_counter()
     final_hits = reciprocal_rank_fusion(
         semantic_hits,
         lexical_hits,
@@ -203,6 +228,7 @@ def hybrid_retrieve(
         semantic_weight=cfg.semantic_weight,
         lexical_weight=cfg.lexical_weight,
     )
+    fusion_ms = (time.perf_counter() - fusion_started) * 1000.0
     return HybridRetrievalResult(
         hits=final_hits,
         diagnostics=HybridDiagnostics(
@@ -211,5 +237,10 @@ def hybrid_retrieve(
             final_count=len(final_hits),
             semantic_ranks=_rank_map(semantic_hits),
             lexical_ranks=_rank_map(lexical_hits),
+            candidate_k=candidate_k,
+            semantic_ms=round(semantic_ms, 3),
+            lexical_ms=round(lexical_ms, 3),
+            fusion_ms=round(fusion_ms, 3),
+            retrieval_ms=round((time.perf_counter() - started) * 1000.0, 3),
         ),
     )
