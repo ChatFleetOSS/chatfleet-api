@@ -1,0 +1,66 @@
+[
+  {
+    "id": "version_stable",
+    "kind": "fact",
+    "question": "Quelles versions stable API et Web sont mentionnees ?",
+    "expected_terms": ["v0.1.21", "v0.1.20"],
+    "forbidden_terms": ["v0.1.22", "v0.1.23"],
+    "expected_fallback": false
+  },
+  {
+    "id": "mongo_preservation",
+    "kind": "fact",
+    "question": "Que doit-on preserver cote Mongo pendant une mise a jour ?",
+    "expected_terms": ["Mongo", "secrets", "URI"],
+    "forbidden_terms": ["supprimer", "recreer"],
+    "expected_fallback": false
+  },
+  {
+    "id": "volumes_preservation",
+    "kind": "fact",
+    "question": "Quels volumes ou donnees ne doivent pas etre supprimes pendant une mise a jour ?",
+    "expected_terms": ["Mongo", "RAG", "uploaded"],
+    "forbidden_terms": ["peuvent etre supprimes"],
+    "expected_fallback": false
+  },
+  {
+    "id": "rag_index_location",
+    "kind": "fact",
+    "question": "Ou sont stockes les index RAG dans le conteneur API ?",
+    "expected_terms": ["/var/lib/chatfleet/faiss"],
+    "forbidden_terms": ["/tmp", "/app"],
+    "expected_fallback": false
+  },
+  {
+    "id": "answer_policy",
+    "kind": "fact",
+    "question": "Quelles regles le RAG impose-t-il pour repondre avec les documents ?",
+    "expected_terms": ["cite", "invent"],
+    "forbidden_terms": ["sans document"],
+    "expected_fallback": false
+  },
+  {
+    "id": "summary",
+    "kind": "summary",
+    "question": "Resume les informations principales disponibles dans ce RAG en 3 a 6 points.",
+    "expected_terms": ["v0.1.21", "v0.1.20", "Mongo", "/var/lib/chatfleet/faiss", "invent"],
+    "forbidden_terms": ["v0.1.22", "v0.1.23"],
+    "expected_fallback": false
+  },
+  {
+    "id": "out_of_context_weather",
+    "kind": "out_of_context",
+    "question": "Quelle est la meteo prevue demain ?",
+    "expected_terms": [],
+    "forbidden_terms": ["soleil", "pluie", "temperature"],
+    "expected_fallback": true
+  },
+  {
+    "id": "out_of_context_japan",
+    "kind": "out_of_context",
+    "question": "Quel est le tarif de remboursement voyage au Japon ?",
+    "expected_terms": [],
+    "forbidden_terms": ["yen", "euro", "dollar", "remboursement"],
+    "expected_fallback": true
+  }
+]

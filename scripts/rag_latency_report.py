@@ -126,6 +126,11 @@ class ChatMeasurement:
     chunks_count: int = 0
     tokens_in: int | None = None
     tokens_out: int | None = None
+    expected_terms: list[str] = field(default_factory=list)
+    forbidden_terms: list[str] = field(default_factory=list)
+    expected_fallback: bool = False
+    quality_score: str | None = None
+    quality_notes: str = ""
     server_events: list[dict[str, Any]] = field(default_factory=list)
 
 
@@ -304,6 +309,9 @@ def _load_client_questions(path: str | None) -> list[dict[str, str]]:
                 "id": str(item.get("id") or f"client_{idx + 1}"),
                 "kind": str(item.get("kind") or "client"),
                 "question": str(item["question"]),
+                "expected_terms": item.get("expected_terms") or [],
+                "forbidden_terms": item.get("forbidden_terms") or [],
+                "expected_fallback": bool(item.get("expected_fallback", False)),
             }
             for idx, item in enumerate(data)
         ]
@@ -344,6 +352,9 @@ def _chat_once(
         mode="chat",
         run=run,
         corr_id=corr_id,
+        expected_terms=list(question.get("expected_terms") or []),
+        forbidden_terms=list(question.get("forbidden_terms") or []),
+        expected_fallback=bool(question.get("expected_fallback", False)),
     )
     started = time.perf_counter()
     try:
@@ -377,6 +388,7 @@ def _chat_once(
     except Exception as exc:
         measurement.client_total_ms = round((time.perf_counter() - started) * 1000.0, 1)
         measurement.error_code = exc.__class__.__name__
+    _score_quality(measurement)
     return measurement
 
 
@@ -411,6 +423,44 @@ def _consume_sse_line(
         measurement.error_code = error.get("code")
 
 
+def _score_quality(measurement: ChatMeasurement) -> None:
+    answer = (measurement.answer_preview or "").lower()
+    missing = [
+        term for term in measurement.expected_terms if term.lower() not in answer
+    ]
+    forbidden = [term for term in measurement.forbidden_terms if term.lower() in answer]
+    has_error = bool(measurement.error_code) or bool(
+        measurement.status_code and measurement.status_code >= 400
+    )
+    if has_error:
+        measurement.quality_score = "KO"
+        measurement.quality_notes = (
+            measurement.error_code or f"HTTP:{measurement.status_code}"
+        )
+        return
+    if measurement.expected_fallback:
+        if "je n'ai pas cette information dans les extraits fournis" in answer:
+            measurement.quality_score = "OK"
+            measurement.quality_notes = "fallback"
+        else:
+            measurement.quality_score = "KO"
+            measurement.quality_notes = "fallback attendu absent"
+        return
+    if forbidden:
+        measurement.quality_score = "KO"
+        measurement.quality_notes = "termes interdits: " + ", ".join(forbidden)
+        return
+    if missing:
+        measurement.quality_score = "limite"
+        measurement.quality_notes = "termes manquants: " + ", ".join(missing)
+        return
+    if measurement.expected_terms:
+        measurement.quality_score = "OK"
+        measurement.quality_notes = "criteres presents"
+    else:
+        measurement.quality_score = "-"
+
+
 def _chat_stream_once(
     client: httpx.Client,
     base_url: str,
@@ -438,6 +488,9 @@ def _chat_stream_once(
         mode="stream",
         run=run,
         corr_id=corr_id,
+        expected_terms=list(question.get("expected_terms") or []),
+        forbidden_terms=list(question.get("forbidden_terms") or []),
+        expected_fallback=bool(question.get("expected_fallback", False)),
     )
     started = time.perf_counter()
     try:
@@ -474,6 +527,7 @@ def _chat_stream_once(
     except Exception as exc:
         measurement.client_total_ms = round((time.perf_counter() - started) * 1000.0, 1)
         measurement.error_code = exc.__class__.__name__
+    _score_quality(measurement)
     return measurement
 
 
@@ -644,8 +698,8 @@ def _markdown_report(
         [
             "## Détail requêtes",
             "",
-            "| Suite | Mode | Run | Question | Status | HTTP ms | First SSE ms | Retrieval ms | LLM ms | Total server ms | Citations | Tokens out | Corr ID |",
-            "|---|---|---:|---|---|---:|---:|---:|---:|---:|---:|---:|---|",
+            "| Suite | Mode | Run | Question | Status | Qualite | HTTP ms | First SSE ms | Retrieval ms | LLM ms | Total server ms | Citations | Tokens out | Corr ID |",
+            "|---|---|---:|---|---|---|---:|---:|---:|---:|---:|---:|---:|---|",
         ]
     )
     for item in measurements:
@@ -661,6 +715,7 @@ def _markdown_report(
                     str(item.run),
                     item.question_id,
                     _status_label(item),
+                    item.quality_score or "-",
                     _fmt(item.client_total_ms),
                     _fmt(item.first_sse_event_ms),
                     _fmt(_event_value(item, "chat.retrieval", "retrieval_ms")),
@@ -747,6 +802,11 @@ def parse_args() -> argparse.Namespace:
         default=int(_env("MAX_TOKENS", "0") or "0"),
         help="Set chat opts.max_tokens for every measured request; 0 uses the API default.",
     )
+    parser.add_argument(
+        "--skip-probe-suite",
+        action="store_true",
+        help="Skip probe RAG chat measurements after the probe index/status check.",
+    )
     parser.add_argument("--api-log-file", default=_env("API_LOG_FILE"))
     parser.add_argument("--docker-container", default=_env("API_DOCKER_CONTAINER"))
     parser.add_argument(
@@ -800,7 +860,9 @@ def main() -> int:
         index_status = _index_status(client, base_url, token, probe_slug)
         print("[probe] index", index_status)
 
-        suites = [("probe", probe_slug, PROBE_QUESTIONS)]
+        suites = (
+            [] if args.skip_probe_suite else [("probe", probe_slug, PROBE_QUESTIONS)]
+        )
         if args.client_rag_slug:
             suites.append(
                 (
