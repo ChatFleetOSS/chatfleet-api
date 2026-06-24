@@ -121,6 +121,7 @@ class ChatMeasurement:
     ready_sse_ms: float | None = None
     x_response_time_ms: float | None = None
     answer_chars: int = 0
+    answer_preview: str = ""
     citations_count: int = 0
     chunks_count: int = 0
     tokens_in: int | None = None
@@ -325,12 +326,15 @@ def _chat_once(
     question: dict[str, str],
     run: int,
     timeout_s: float,
+    max_tokens: int | None,
 ) -> ChatMeasurement:
     corr_id = f"rag-lat-{suite}-{question['id']}-chat-{run}-{uuid.uuid4()}"
     payload = {
         "rag_slug": slug,
         "messages": [{"role": "user", "content": question["question"]}],
     }
+    if max_tokens is not None:
+        payload["opts"] = {"max_tokens": max_tokens}
     measurement = ChatMeasurement(
         suite=suite,
         rag_slug=slug,
@@ -366,6 +370,7 @@ def _chat_once(
         citations = data.get("citations") or []
         usage = data.get("usage") or {}
         measurement.answer_chars = len(answer)
+        measurement.answer_preview = answer[:500]
         measurement.citations_count = len(citations)
         measurement.tokens_in = usage.get("tokens_in")
         measurement.tokens_out = usage.get("tokens_out")
@@ -390,8 +395,11 @@ def _consume_sse_line(
     except json.JSONDecodeError:
         payload = {}
     if event == "chunk":
+        delta = payload.get("delta") or ""
         measurement.chunks_count += 1
-        measurement.answer_chars += len(payload.get("delta") or "")
+        measurement.answer_chars += len(delta)
+        if len(measurement.answer_preview) < 500:
+            measurement.answer_preview = (measurement.answer_preview + delta)[:500]
     elif event == "citations":
         measurement.citations_count = len(payload.get("citations") or [])
     elif event == "done":
@@ -412,12 +420,15 @@ def _chat_stream_once(
     question: dict[str, str],
     run: int,
     timeout_s: float,
+    max_tokens: int | None,
 ) -> ChatMeasurement:
     corr_id = f"rag-lat-{suite}-{question['id']}-stream-{run}-{uuid.uuid4()}"
     payload = {
         "rag_slug": slug,
         "messages": [{"role": "user", "content": question["question"]}],
     }
+    if max_tokens is not None:
+        payload["opts"] = {"max_tokens": max_tokens}
     measurement = ChatMeasurement(
         suite=suite,
         rag_slug=slug,
@@ -730,6 +741,12 @@ def parse_args() -> argparse.Namespace:
         default=int(_env("MAX_QUESTIONS_PER_SUITE", "0") or "0"),
         help="Limit questions per suite for short latency probes; 0 runs all questions.",
     )
+    parser.add_argument(
+        "--max-tokens",
+        type=int,
+        default=int(_env("MAX_TOKENS", "0") or "0"),
+        help="Set chat opts.max_tokens for every measured request; 0 uses the API default.",
+    )
     parser.add_argument("--api-log-file", default=_env("API_LOG_FILE"))
     parser.add_argument("--docker-container", default=_env("API_DOCKER_CONTAINER"))
     parser.add_argument(
@@ -811,6 +828,7 @@ def main() -> int:
                             question,
                             run,
                             args.timeout,
+                            args.max_tokens if args.max_tokens > 0 else None,
                         )
                     )
                     measurements.append(
@@ -823,6 +841,7 @@ def main() -> int:
                             question,
                             run,
                             args.timeout,
+                            args.max_tokens if args.max_tokens > 0 else None,
                         )
                     )
 
