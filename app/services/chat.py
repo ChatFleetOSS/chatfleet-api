@@ -58,6 +58,24 @@ IMMUTABLE_RAG_SYSTEM_POLICY = (
 )
 
 
+def _log_metric_event(
+    target_logger: logging.Logger,
+    event: str,
+    payload: Dict[str, Any],
+) -> None:
+    """Emit machine-parseable metrics with the current plain-text logger."""
+
+    try:
+        data = {"event": event, **payload}
+        target_logger.info(
+            "chatfleet.metrics %s",
+            json.dumps(data, sort_keys=True, default=str),
+            extra=payload,
+        )
+    except Exception:
+        pass
+
+
 def _format_hits_for_prompt(hits: Sequence[tuple[float, ChunkRecord]]) -> str:
     """Legacy formatter (kept for logging)."""
     if not hits:
@@ -623,13 +641,26 @@ async def _generate_answer(
             max_tokens=max_tokens,
         )
     finally:
+        llm_ms = round((time.perf_counter() - llm_started) * 1000.0, 3)
         logger.info(
             "chat.llm.timing",
             extra={
                 "corr_id": get_corr_id(),
                 "rag_slug": request.rag_slug,
                 "prompt_build_ms": round(prompt_build_ms, 3),
-                "llm_ms": round((time.perf_counter() - llm_started) * 1000.0, 3),
+                "llm_ms": llm_ms,
+                "temperature": temperature,
+                "max_tokens": max_tokens,
+            },
+        )
+        _log_metric_event(
+            logger,
+            "chat.llm.timing",
+            {
+                "corr_id": get_corr_id(),
+                "rag_slug": request.rag_slug,
+                "prompt_build_ms": round(prompt_build_ms, 3),
+                "llm_ms": llm_ms,
                 "temperature": temperature,
                 "max_tokens": max_tokens,
             },
@@ -743,6 +774,27 @@ async def handle_chat(request: ChatRequest, user_id: str) -> ChatResponse:
             "context_token_budget": CONTEXT_TOKEN_BUDGET,
         },
     )
+    _log_metric_event(
+        retrieval_logger,
+        "chat.retrieval",
+        {
+            "corr_id": corr_id,
+            "rag_slug": request.rag_slug,
+            "stream": False,
+            "retrieval_mode": retrieval_config.mode if retrieval_config else "hybrid",
+            "top_k": top_k,
+            "candidate_k": retrieval_result.diagnostics.candidate_k,
+            "semantic_hit_count": retrieval_result.diagnostics.semantic_count,
+            "lexical_hit_count": retrieval_result.diagnostics.lexical_count,
+            "final_hit_count": retrieval_result.diagnostics.final_count,
+            "embedding_ms": retrieval_result.diagnostics.embedding_ms,
+            "semantic_ms": retrieval_result.diagnostics.semantic_ms,
+            "lexical_ms": retrieval_result.diagnostics.lexical_ms,
+            "fusion_ms": retrieval_result.diagnostics.fusion_ms,
+            "retrieval_ms": retrieval_result.diagnostics.retrieval_ms,
+            "context_token_budget": CONTEXT_TOKEN_BUDGET,
+        },
+    )
     try:
         retrieval_logger.info(
             "chat.retrieval.topk corr_id=%s rag=%s %s",
@@ -808,6 +860,20 @@ async def handle_chat(request: ChatRequest, user_id: str) -> ChatResponse:
             "embedding_ms": retrieval_result.diagnostics.embedding_ms,
             "retrieval_ms": retrieval_result.diagnostics.retrieval_ms,
             "tokens_out": tokens_out,
+        },
+    )
+    _log_metric_event(
+        logger,
+        "chat.completion.timing",
+        {
+            "corr_id": corr_id,
+            "rag_slug": request.rag_slug,
+            "total_ms": round((time.perf_counter() - request_started) * 1000.0, 3),
+            "embedding_ms": retrieval_result.diagnostics.embedding_ms,
+            "retrieval_ms": retrieval_result.diagnostics.retrieval_ms,
+            "tokens_in": usage.tokens_in,
+            "tokens_out": tokens_out,
+            "citations_count": len(citations),
         },
     )
 
@@ -914,6 +980,27 @@ async def stream_chat(request: ChatRequest, user_id: str) -> AsyncGenerator[str,
             "hits": _retrieval_hit_details(retrieval_result),
             "hit_previews": _preview_hits(hits),
             "question": question,
+            "context_token_budget": CONTEXT_TOKEN_BUDGET,
+        },
+    )
+    _log_metric_event(
+        logger,
+        "chat.retrieval",
+        {
+            "corr_id": corr_id,
+            "rag_slug": request.rag_slug,
+            "stream": True,
+            "retrieval_mode": retrieval_config.mode if retrieval_config else "hybrid",
+            "top_k": top_k,
+            "candidate_k": retrieval_result.diagnostics.candidate_k,
+            "semantic_hit_count": retrieval_result.diagnostics.semantic_count,
+            "lexical_hit_count": retrieval_result.diagnostics.lexical_count,
+            "final_hit_count": retrieval_result.diagnostics.final_count,
+            "embedding_ms": retrieval_result.diagnostics.embedding_ms,
+            "semantic_ms": retrieval_result.diagnostics.semantic_ms,
+            "lexical_ms": retrieval_result.diagnostics.lexical_ms,
+            "fusion_ms": retrieval_result.diagnostics.fusion_ms,
+            "retrieval_ms": retrieval_result.diagnostics.retrieval_ms,
             "context_token_budget": CONTEXT_TOKEN_BUDGET,
         },
     )
@@ -1027,6 +1114,21 @@ async def stream_chat(request: ChatRequest, user_id: str) -> AsyncGenerator[str,
             "embedding_ms": retrieval_result.diagnostics.embedding_ms,
             "retrieval_ms": retrieval_result.diagnostics.retrieval_ms,
             "tokens_out": tokens_out,
+            "chunks": len(segments),
+        },
+    )
+    _log_metric_event(
+        logger,
+        "chat.stream.timing",
+        {
+            "corr_id": corr_id,
+            "rag_slug": request.rag_slug,
+            "total_ms": round((time.perf_counter() - request_started) * 1000.0, 3),
+            "embedding_ms": retrieval_result.diagnostics.embedding_ms,
+            "retrieval_ms": retrieval_result.diagnostics.retrieval_ms,
+            "tokens_in": usage["tokens_in"],
+            "tokens_out": tokens_out,
+            "citations_count": len(citations),
             "chunks": len(segments),
         },
     )
