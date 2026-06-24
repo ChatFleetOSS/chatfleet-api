@@ -724,6 +724,12 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=float(_env("POLL_TIMEOUT", "120") or "120"),
     )
+    parser.add_argument(
+        "--max-questions-per-suite",
+        type=int,
+        default=int(_env("MAX_QUESTIONS_PER_SUITE", "0") or "0"),
+        help="Limit questions per suite for short latency probes; 0 runs all questions.",
+    )
     parser.add_argument("--api-log-file", default=_env("API_LOG_FILE"))
     parser.add_argument("--docker-container", default=_env("API_DOCKER_CONTAINER"))
     parser.add_argument(
@@ -790,6 +796,8 @@ def main() -> int:
             print("[client] CLIENT_RAG_SLUG not set; skipping client RAG measurements")
 
         for suite, slug, questions in suites:
+            if args.max_questions_per_suite > 0:
+                questions = questions[: args.max_questions_per_suite]
             print(f"[suite] {suite} rag={slug} questions={len(questions)}")
             for run in range(1, args.runs + 1):
                 for question in questions:

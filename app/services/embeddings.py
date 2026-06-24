@@ -228,8 +228,11 @@ async def embed_texts(texts: Iterable[str]) -> List[List[float]]:
             key = key or (await get_api_key())
         except Exception:
             pass
-    provider = getattr(cfg, "provider", "openai")
-    base_url = None if provider == "openai" else getattr(cfg, "base_url", None)
+    embed_provider = getattr(cfg, "embed_provider", "openai")
+    provider = (
+        "openai" if embed_provider == "openai" else getattr(cfg, "provider", "openai")
+    )
+    base_url = None if embed_provider == "openai" else getattr(cfg, "base_url", None)
     client = _get_embed_client(provider, base_url, key)
     if client is None:
         dim = _fallback_dim(cfg)

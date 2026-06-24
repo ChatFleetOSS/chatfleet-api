@@ -74,6 +74,35 @@ class EmbeddingsFallbackUnitTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(vectors), 1)
         self.assertEqual(len(vectors[0]), embeddings.EMBED_DIM)
 
+    async def test_vllm_chat_can_use_openai_embedding_provider(self) -> None:
+        cfg = SimpleNamespace(
+            provider="vllm",
+            base_url="http://host.docker.internal:2251/v1",
+            embed_provider="openai",
+            embed_model="text-embedding-3-small",
+        )
+        client = SimpleNamespace(
+            embeddings=SimpleNamespace(
+                create=lambda **_kwargs: SimpleNamespace(
+                    data=[SimpleNamespace(embedding=[0.1, 0.2, 0.3])]
+                )
+            )
+        )
+
+        with (
+            patch.object(embeddings, "get_llm_config", return_value=cfg),
+            patch.object(embeddings, "get_api_key", return_value="test-key"),
+            patch.object(
+                embeddings, "_get_embed_client", return_value=client
+            ) as get_client,
+            patch.object(embeddings, "_embed_texts_local") as local_embed,
+        ):
+            vectors = await embeddings.embed_texts(["commune de saint-joseph"])
+
+        get_client.assert_called_once_with("openai", None, "test-key")
+        local_embed.assert_not_called()
+        self.assertEqual(vectors, [[0.1, 0.2, 0.3]])
+
     async def test_local_encode_respects_configured_concurrency_limit(self) -> None:
         active = 0
         max_active = 0
