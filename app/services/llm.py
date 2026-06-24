@@ -9,6 +9,7 @@ available, and falls back to `None` to let callers apply deterministic logic.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import re
@@ -22,6 +23,7 @@ except ImportError:  # pragma: no cover - optional dependency
     OpenAI = None  # type: ignore
 
 from app.core.config import settings
+from app.core.corr_id import get_corr_id
 from app.models.admin import LLMConfigTestRequest
 from app.services.runtime_config import get_llm_config, get_api_key
 
@@ -33,6 +35,18 @@ _LLAMACPP_CHANNEL_DELIMITER_RE = re.compile(r"(?is)<channel\|>")
 _LLAMACPP_LEADING_MARKERS_RE = re.compile(
     r"(?is)^(?:\s*(?:<\|channel\>\s*[a-z0-9_-]+\s*|<channel\|>))+"
 )
+
+
+def _log_metric_event(event: str, payload: Dict[str, Any]) -> None:
+    try:
+        data = {"event": event, **payload}
+        logger.info(
+            "chatfleet.metrics %s",
+            json.dumps(data, sort_keys=True, default=str),
+            extra=payload,
+        )
+    except Exception:
+        pass
 
 
 class LLMProviderError(Exception):
@@ -228,6 +242,7 @@ async def generate_chat_completion(
         return None
 
     loop = asyncio.get_running_loop()
+    corr_id = get_corr_id()
 
     def _call(model_name: str) -> Tuple[str, int]:
         started = time.perf_counter()
@@ -248,7 +263,11 @@ async def generate_chat_completion(
         metrics["elapsed_ms"] = round((time.perf_counter() - started) * 1000.0, 3)
         metrics["model"] = model_name
         metrics["provider"] = cfg.provider
+        metrics["corr_id"] = corr_id
+        metrics["max_tokens"] = max_tokens
+        metrics["temperature"] = temperature
         logger.info("LLM response metrics", extra=metrics)
+        _log_metric_event("llm.response", metrics)
         if not text:
             if metrics["reasoning_len"] > 0:
                 raise LLMProviderError(

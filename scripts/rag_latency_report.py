@@ -166,10 +166,18 @@ def _percentile(values: list[float], pct: float) -> float | None:
 def _summarize(values: Iterable[float | None]) -> dict[str, float | None]:
     clean = [float(value) for value in values if value is not None]
     if not clean:
-        return {"count": 0, "min": None, "p50": None, "p95": None, "max": None}
+        return {
+            "count": 0,
+            "min": None,
+            "p30": None,
+            "p50": None,
+            "p95": None,
+            "max": None,
+        }
     return {
         "count": len(clean),
         "min": round(min(clean), 1),
+        "p30": round(_percentile(clean, 30) or 0, 1),
         "p50": round(statistics.median(clean), 1),
         "p95": round(_percentile(clean, 95) or 0, 1),
         "max": round(max(clean), 1),
@@ -680,16 +688,26 @@ def _markdown_report(
                 _parse_float(_event_value(m, "chat.llm.timing", "llm_ms"))
                 for m in mode_items
             )
+            reasoning = _summarize(
+                _parse_float(_event_value(m, "llm.response", "reasoning_len"))
+                for m in mode_items
+            )
+            content = _summarize(
+                _parse_float(_event_value(m, "llm.response", "content_len"))
+                for m in mode_items
+            )
             lines.extend(
                 [
                     f"### `{mode}`",
                     "",
-                    "| Métrique | count | min | p50 | p95 | max |",
-                    "|---|---:|---:|---:|---:|---:|",
-                    f"| client_total_ms | {total['count']} | {_fmt(total['min'])} | {_fmt(total['p50'])} | {_fmt(total['p95'])} | {_fmt(total['max'])} |",
-                    f"| first_sse_event_ms | {first['count']} | {_fmt(first['min'])} | {_fmt(first['p50'])} | {_fmt(first['p95'])} | {_fmt(first['max'])} |",
-                    f"| server_retrieval_ms | {retrieval['count']} | {_fmt(retrieval['min'])} | {_fmt(retrieval['p50'])} | {_fmt(retrieval['p95'])} | {_fmt(retrieval['max'])} |",
-                    f"| server_llm_ms | {llm['count']} | {_fmt(llm['min'])} | {_fmt(llm['p50'])} | {_fmt(llm['p95'])} | {_fmt(llm['max'])} |",
+                    "| Métrique | count | min | p30 | p50 | p95 | max |",
+                    "|---|---:|---:|---:|---:|---:|---:|",
+                    f"| client_total_ms | {total['count']} | {_fmt(total['min'])} | {_fmt(total['p30'])} | {_fmt(total['p50'])} | {_fmt(total['p95'])} | {_fmt(total['max'])} |",
+                    f"| first_sse_event_ms | {first['count']} | {_fmt(first['min'])} | {_fmt(first['p30'])} | {_fmt(first['p50'])} | {_fmt(first['p95'])} | {_fmt(first['max'])} |",
+                    f"| server_retrieval_ms | {retrieval['count']} | {_fmt(retrieval['min'])} | {_fmt(retrieval['p30'])} | {_fmt(retrieval['p50'])} | {_fmt(retrieval['p95'])} | {_fmt(retrieval['max'])} |",
+                    f"| server_llm_ms | {llm['count']} | {_fmt(llm['min'])} | {_fmt(llm['p30'])} | {_fmt(llm['p50'])} | {_fmt(llm['p95'])} | {_fmt(llm['max'])} |",
+                    f"| reasoning_len | {reasoning['count']} | {_fmt(reasoning['min'])} | {_fmt(reasoning['p30'])} | {_fmt(reasoning['p50'])} | {_fmt(reasoning['p95'])} | {_fmt(reasoning['max'])} |",
+                    f"| content_len | {content['count']} | {_fmt(content['min'])} | {_fmt(content['p30'])} | {_fmt(content['p50'])} | {_fmt(content['p95'])} | {_fmt(content['max'])} |",
                     "",
                 ]
             )
@@ -698,8 +716,8 @@ def _markdown_report(
         [
             "## Détail requêtes",
             "",
-            "| Suite | Mode | Run | Question | Status | Qualite | HTTP ms | First SSE ms | Retrieval ms | LLM ms | Total server ms | Citations | Tokens out | Corr ID |",
-            "|---|---|---:|---|---|---|---:|---:|---:|---:|---:|---:|---:|---|",
+            "| Suite | Mode | Run | Question | Status | Qualite | HTTP ms | First SSE ms | Retrieval ms | LLM ms | Reasoning chars | Content chars | Finish | Total server ms | Citations | Tokens out | Corr ID |",
+            "|---|---|---:|---|---|---|---:|---:|---:|---:|---:|---:|---|---:|---:|---:|---|",
         ]
     )
     for item in measurements:
@@ -720,6 +738,9 @@ def _markdown_report(
                     _fmt(item.first_sse_event_ms),
                     _fmt(_event_value(item, "chat.retrieval", "retrieval_ms")),
                     _fmt(_event_value(item, "chat.llm.timing", "llm_ms")),
+                    _fmt(_event_value(item, "llm.response", "reasoning_len")),
+                    _fmt(_event_value(item, "llm.response", "content_len")),
+                    _fmt(_event_value(item, "llm.response", "finish_reason")),
                     _fmt(server_total),
                     str(item.citations_count),
                     _fmt(item.tokens_out),

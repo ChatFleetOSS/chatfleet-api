@@ -96,6 +96,28 @@ class RagSystemPromptUnitTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Pas de raisonnement detaille", messages[1]["content"])
         self.assertNotIn("RÈGLES:", messages[1]["content"])
 
+    def test_direct_answer_prompt_variant_requests_final_answer_only(self) -> None:
+        request = ChatRequest(
+            rag_slug="policies",
+            messages=[ChatMessage(role="user", content="What is the leave policy?")],
+        )
+
+        with patch.object(chat, "RAG_PROMPT_VARIANT", "direct_answer"):
+            messages = chat._build_prompt_messages(
+                request,
+                hits=[],
+                system_prompt="Answer in a direct support tone.",
+            )
+
+        self.assertEqual(messages[0]["role"], "system")
+        self.assertIn("Ne montre aucun raisonnement interne", messages[0]["content"])
+        self.assertIn("Answer in a direct support tone.", messages[0]["content"])
+        self.assertEqual(messages[1]["role"], "user")
+        self.assertIn("REPONDS MAINTENANT:", messages[1]["content"])
+        self.assertIn("Donne uniquement la reponse finale", messages[1]["content"])
+        self.assertIn("Maximum 4 puces courtes", messages[1]["content"])
+        self.assertNotIn("RÈGLES:", messages[1]["content"])
+
     def test_chat_prompt_is_compatible_with_strict_local_chat_templates(self) -> None:
         request = ChatRequest(
             rag_slug="policies",
