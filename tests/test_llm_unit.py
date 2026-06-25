@@ -54,7 +54,9 @@ def test_extract_inline_thinking_without_final_answer_metrics():
 def test_extract_inline_thinking_keeps_final_answer():
     choice = SimpleNamespace(
         finish_reason="stop",
-        message=SimpleNamespace(content="<think>Reasoning</think>\nFinal answer.", reasoning_content=None),
+        message=SimpleNamespace(
+            content="<think>Reasoning</think>\nFinal answer.", reasoning_content=None
+        ),
     )
     response = SimpleNamespace(
         usage=SimpleNamespace(completion_tokens=12),
@@ -67,10 +69,30 @@ def test_extract_inline_thinking_keeps_final_answer():
     assert metrics["content_len"] == len("Final answer.")
 
 
+def test_extract_leading_end_think_marker_is_not_visible():
+    choice = SimpleNamespace(
+        finish_reason="stop",
+        message=SimpleNamespace(
+            content="</think>\n\nFinal answer.", reasoning_content=None
+        ),
+    )
+    response = SimpleNamespace(
+        usage=SimpleNamespace(completion_tokens=4),
+    )
+
+    text, metrics = _extract_message_text(choice, response)
+
+    assert text == "Final answer."
+    assert metrics["reasoning_len"] == 0
+    assert metrics["content_len"] == len("Final answer.")
+
+
 def test_extract_llamacpp_channel_markers_keeps_answer():
     choice = SimpleNamespace(
         finish_reason="stop",
-        message=SimpleNamespace(content="<|channel>thought\n<channel|>pong", reasoning_content=None),
+        message=SimpleNamespace(
+            content="<|channel>thought\n<channel|>pong", reasoning_content=None
+        ),
     )
     response = SimpleNamespace(
         usage=SimpleNamespace(completion_tokens=2),
@@ -85,7 +107,9 @@ def test_extract_llamacpp_channel_markers_keeps_answer():
 def test_extract_llamacpp_channel_markers_with_spaces_keeps_answer():
     choice = SimpleNamespace(
         finish_reason="stop",
-        message=SimpleNamespace(content="<|channel>thought <channel|>Final answer.", reasoning_content=None),
+        message=SimpleNamespace(
+            content="<|channel>thought <channel|>Final answer.", reasoning_content=None
+        ),
     )
     response = SimpleNamespace(
         usage=SimpleNamespace(completion_tokens=4),
@@ -100,7 +124,9 @@ def test_extract_llamacpp_channel_markers_with_spaces_keeps_answer():
 def test_extract_llamacpp_empty_channel_markers_stays_empty():
     choice = SimpleNamespace(
         finish_reason="stop",
-        message=SimpleNamespace(content="<|channel>thought\n<channel|>", reasoning_content=None),
+        message=SimpleNamespace(
+            content="<|channel>thought\n<channel|>", reasoning_content=None
+        ),
     )
     response = SimpleNamespace(
         usage=SimpleNamespace(completion_tokens=2),

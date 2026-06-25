@@ -1,5 +1,12 @@
 # ChatFleet API — Release Notes
 
+## v0.1.24
+- RAG/DeepSeek: default RAG prompt now uses a direct-answer policy optimized for low-latency local reasoning models.
+- LLM cleanup: removes leading `</think>` markers emitted by llama.cpp when DeepSeek is launched with `--reasoning-budget 0`.
+- LLM metrics: emits correlated `llm.response` metrics including latency, completion tokens, visible content length, and reasoning length.
+- Runtime config: chat and embedding providers can be configured independently, allowing DeepSeek/vLLM chat with OpenAI-compatible embeddings.
+- Ops note: for the validated low-latency setup, launch DeepSeek via llama.cpp with `--reasoning-budget 0`; `--reasoning off` was not sufficient for the tested DeepSeek R1 Distill model.
+
 ## v0.1.6
 - Auth: Immediate admin on first login if an installer-created promotion intent exists for the email. No more polling delay.
 - Startup: Ensure `admin_promotions` indexes (unique email, TTL on `expires_at`).

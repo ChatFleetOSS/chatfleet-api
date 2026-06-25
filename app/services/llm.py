@@ -9,9 +9,11 @@ available, and falls back to `None` to let callers apply deterministic logic.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import re
+import time
 from typing import Any, Dict, List, Optional, Tuple, cast
 from functools import partial
 
@@ -21,6 +23,7 @@ except ImportError:  # pragma: no cover - optional dependency
     OpenAI = None  # type: ignore
 
 from app.core.config import settings
+from app.core.corr_id import get_corr_id
 from app.models.admin import LLMConfigTestRequest
 from app.services.runtime_config import get_llm_config, get_api_key
 
@@ -32,6 +35,18 @@ _LLAMACPP_CHANNEL_DELIMITER_RE = re.compile(r"(?is)<channel\|>")
 _LLAMACPP_LEADING_MARKERS_RE = re.compile(
     r"(?is)^(?:\s*(?:<\|channel\>\s*[a-z0-9_-]+\s*|<channel\|>))+"
 )
+
+
+def _log_metric_event(event: str, payload: Dict[str, Any]) -> None:
+    try:
+        data = {"event": event, **payload}
+        logger.info(
+            "chatfleet.metrics %s",
+            json.dumps(data, sort_keys=True, default=str),
+            extra=payload,
+        )
+    except Exception:
+        pass
 
 
 class LLMProviderError(Exception):
@@ -74,6 +89,7 @@ def _coerce_content_to_text(content: Any) -> str:
 
 
 def _split_thinking_content(text: str) -> tuple[str, str]:
+    text = re.sub(r"(?is)^\s*</think>\s*", "", text).strip()
     if not text.lower().startswith("<think>"):
         return text, ""
 
@@ -91,14 +107,14 @@ def _split_llamacpp_channel_content(text: str) -> tuple[str, str]:
         return text, ""
 
     channel = match.group(1).lower()
-    remaining = text[match.end():]
+    remaining = text[match.end() :]
     delimiter = _LLAMACPP_CHANNEL_DELIMITER_RE.search(remaining)
     reasoning = ""
     if delimiter:
         before_delimiter = remaining[: delimiter.start()].strip()
         if channel == "thought" and before_delimiter:
             reasoning = before_delimiter
-        text = remaining[delimiter.end():]
+        text = remaining[delimiter.end() :]
     else:
         if channel == "thought":
             reasoning = remaining.strip()
@@ -135,7 +151,11 @@ def _map_provider_exception(exc: Exception) -> LLMProviderError:
     name = exc.__class__.__name__
     msg = str(exc)
     low = msg.lower()
-    if "timeout" in low or "timed out" in low or name in {"APITimeoutError", "ReadTimeout"}:
+    if (
+        "timeout" in low
+        or "timed out" in low
+        or name in {"APITimeoutError", "ReadTimeout"}
+    ):
         return LLMProviderError(
             "LLM_TIMEOUT",
             "Le modèle local met trop de temps à répondre. Essayez une question plus ciblée, ou demandez à un administrateur d'augmenter le timeout, de réduire top_k, ou de choisir un modèle plus rapide.",
@@ -172,7 +192,9 @@ def _map_provider_exception(exc: Exception) -> LLMProviderError:
     )
 
 
-def _get_chat_client(provider: str, base_url: str | None, key: str | None) -> OpenAI | None:
+def _get_chat_client(
+    provider: str, base_url: str | None, key: str | None
+) -> OpenAI | None:
     if OpenAI is None:
         return None
     eff_key = key or ("sk-ignored" if provider == "vllm" else None)
@@ -221,8 +243,10 @@ async def generate_chat_completion(
         return None
 
     loop = asyncio.get_running_loop()
+    corr_id = get_corr_id()
 
     def _call(model_name: str) -> Tuple[str, int]:
+        started = time.perf_counter()
         response = client.chat.completions.create(
             model=model_name,
             messages=cast(Any, messages),
@@ -237,7 +261,14 @@ async def generate_chat_completion(
             )
         choice = response.choices[0]
         text, metrics = _extract_message_text(choice, response)
+        metrics["elapsed_ms"] = round((time.perf_counter() - started) * 1000.0, 3)
+        metrics["model"] = model_name
+        metrics["provider"] = cfg.provider
+        metrics["corr_id"] = corr_id
+        metrics["max_tokens"] = max_tokens
+        metrics["temperature"] = temperature
         logger.info("LLM response metrics", extra=metrics)
+        _log_metric_event("llm.response", metrics)
         if not text:
             if metrics["reasoning_len"] > 0:
                 raise LLMProviderError(
@@ -269,11 +300,13 @@ async def generate_chat_completion(
         cfg = await get_llm_config()
         model_name = (cfg.chat_model or settings.chat_model).strip()
         if not model_name:
+
             def _pick_model() -> str:
                 models = client.models.list().data
                 if not models:
                     raise RuntimeError("No models returned by /v1/models")
                 return models[0].id
+
             model_name = await loop.run_in_executor(None, _pick_model)
         return await loop.run_in_executor(None, partial(_call, model_name))
     except LLMProviderError:
@@ -303,7 +336,9 @@ async def generate_chat_completion(
         raise mapped
 
 
-async def test_chat_completion_provider(payload: LLMConfigTestRequest) -> tuple[bool, str | None]:
+async def test_chat_completion_provider(
+    payload: LLMConfigTestRequest,
+) -> tuple[bool, str | None]:
     """Verify connectivity and basic capability to the configured provider.
 
     - For provider 'openai': require an API key; attempt `models.list()` first, then a 1-token completion.
@@ -342,6 +377,7 @@ async def test_chat_completion_provider(payload: LLMConfigTestRequest) -> tuple[
         except Exception:
             # Try a tiny completion for providers that support chat
             try:
+
                 def _tiny_completion() -> bool:
                     _ = client.chat.completions.create(
                         model=(payload.chat_model or settings.chat_model),
@@ -371,12 +407,17 @@ async def test_chat_completion_provider(payload: LLMConfigTestRequest) -> tuple[
         msg = str(exc)
         if "API key" in msg and (provider == "openai"):
             return False, "AUTH_ERROR: missing or invalid API key"
-        if "Name or service not known" in msg or "Failed to establish a new connection" in msg:
+        if (
+            "Name or service not known" in msg
+            or "Failed to establish a new connection" in msg
+        ):
             return False, "CONNECTION_ERROR: check base_url/network"
         return False, f"PROVIDER_ERROR: {msg}"
 
 
-async def discover_models(provider: str, base_url: Optional[str], api_key: Optional[str]) -> tuple[list[str], list[str], list[str]]:
+async def discover_models(
+    provider: str, base_url: Optional[str], api_key: Optional[str]
+) -> tuple[list[str], list[str], list[str]]:
     """Return (chat_models, embedding_models, raw_models).
 
     Uses the OpenAI-compatible /v1/models when available. For vLLM, base_url is required.
