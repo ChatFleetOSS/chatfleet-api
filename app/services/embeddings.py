@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import importlib
 import math
 import os
 import threading
@@ -29,13 +30,11 @@ try:
 except ImportError:  # pragma: no cover - optional dependency
     OpenAI = None  # type: ignore
 
-try:
-    from sentence_transformers import SentenceTransformer
-except ImportError:  # pragma: no cover - optional dependency
-    SentenceTransformer = None  # type: ignore
+SentenceTransformer: Any | None = None
+_sentence_transformer_import_error: Exception | None = None
 
 _client_cache: dict[tuple[str | None, str | None], OpenAI] = {}
-_local_models: dict[str, "SentenceTransformer"] = {}
+_local_models: dict[str, Any] = {}
 _local_model_lock = threading.Lock()
 _local_embed_semaphore: tuple[int, asyncio.Semaphore] | None = None
 EMBED_DIM = 1536
@@ -74,7 +73,9 @@ def _get_local_embed_semaphore() -> asyncio.Semaphore:
     return _local_embed_semaphore[1]
 
 
-def _get_embed_client(provider: str, base_url: str | None, key: str | None) -> OpenAI | None:
+def _get_embed_client(
+    provider: str, base_url: str | None, key: str | None
+) -> OpenAI | None:
     if OpenAI is None:
         return None
     eff_key = key or ("sk-ignored" if provider == "vllm" else None)
@@ -101,16 +102,36 @@ def _deterministic_embedding(text: str, dim: int = EMBED_DIM) -> List[float]:
         return tiled.tolist()
     return (tiled / norm).tolist()
 
-def _ensure_local_model(model_name: str) -> "SentenceTransformer" | None:
-    if SentenceTransformer is None:
+
+def _get_sentence_transformer_class() -> Any | None:
+    """Import SentenceTransformer only when local embeddings are used."""
+
+    global SentenceTransformer, _sentence_transformer_import_error
+    if SentenceTransformer is not None:
+        return SentenceTransformer
+    if _sentence_transformer_import_error is not None:
         return None
+    try:
+        module = importlib.import_module("sentence_transformers")
+        SentenceTransformer = module.SentenceTransformer
+        return SentenceTransformer
+    except Exception as exc:  # pragma: no cover - depends on optional deps
+        _sentence_transformer_import_error = exc
+        logger.exception("embeddings.local.import_error")
+        return None
+
+
+def _ensure_local_model(model_name: str) -> Any | None:
     with _local_model_lock:
         model = _local_models.get(model_name)
         if model is not None:
             return model
+        sentence_transformer_cls = _get_sentence_transformer_class()
+        if sentence_transformer_cls is None:
+            return None
         rss_before = _current_rss_mb()
         start = time.perf_counter()
-        model = SentenceTransformer(model_name)
+        model = sentence_transformer_cls(model_name)
         _local_models[model_name] = model
         logger.info(
             "embeddings.local.model_loaded",
@@ -123,6 +144,7 @@ def _ensure_local_model(model_name: str) -> "SentenceTransformer" | None:
             },
         )
         return model
+
 
 async def _embed_texts_local(texts: list[str], model_name: str) -> List[List[float]]:
     model = _ensure_local_model(model_name)
@@ -185,7 +207,9 @@ async def embed_texts(texts: Iterable[str]) -> List[List[float]]:
     if cfg is not None and getattr(cfg, "embed_provider", "openai") == "local":
         model_name = cfg.embed_model or LOCAL_EMBED_MODEL_DEFAULT
         try:
-            logger.info("embeddings.local", extra={"count": len(items), "model": model_name})
+            logger.info(
+                "embeddings.local", extra={"count": len(items), "model": model_name}
+            )
             vectors = await _embed_texts_local(items, model_name)
             logger.info(
                 "embeddings.local.ok",
@@ -204,12 +228,17 @@ async def embed_texts(texts: Iterable[str]) -> List[List[float]]:
             key = key or (await get_api_key())
         except Exception:
             pass
-    provider = getattr(cfg, "provider", "openai")
-    base_url = None if provider == "openai" else getattr(cfg, "base_url", None)
+    embed_provider = getattr(cfg, "embed_provider", "openai")
+    provider = (
+        "openai" if embed_provider == "openai" else getattr(cfg, "provider", "openai")
+    )
+    base_url = None if embed_provider == "openai" else getattr(cfg, "base_url", None)
     client = _get_embed_client(provider, base_url, key)
     if client is None:
         dim = _fallback_dim(cfg)
-        logger.warning("embeddings.fallback.deterministic", extra={"count": len(items), "dim": dim})
+        logger.warning(
+            "embeddings.fallback.deterministic", extra={"count": len(items), "dim": dim}
+        )
         vectors = [_deterministic_embedding(text, dim=dim) for text in items]
         logger.info(
             "embeddings.fallback.ok",
@@ -227,7 +256,9 @@ async def embed_texts(texts: Iterable[str]) -> List[List[float]]:
         cfg = cfg or await get_llm_config()
         if getattr(cfg, "embed_provider", "openai") == "local":
             model_name = cfg.embed_model or LOCAL_EMBED_MODEL_DEFAULT
-            logger.info("embeddings.local", extra={"count": len(items), "model": model_name})
+            logger.info(
+                "embeddings.local", extra={"count": len(items), "model": model_name}
+            )
             vectors = await _embed_texts_local(items, model_name)
             logger.info(
                 "embeddings.local.ok",
@@ -235,11 +266,21 @@ async def embed_texts(texts: Iterable[str]) -> List[List[float]]:
             )
             return vectors
         model_name = cfg.embed_model or settings.embed_model
-        logger.info("embeddings.remote", extra={"count": len(items), "model": model_name, "provider": cfg.provider})
+        logger.info(
+            "embeddings.remote",
+            extra={"count": len(items), "model": model_name, "provider": cfg.provider},
+        )
+        started = time.perf_counter()
         vectors = await loop.run_in_executor(None, lambda: _call(model_name))
         logger.info(
             "embeddings.remote.ok",
-            extra={"count": len(vectors), "dim": len(vectors[0]) if vectors else 0, "provider": cfg.provider},
+            extra={
+                "count": len(vectors),
+                "dim": len(vectors[0]) if vectors else 0,
+                "provider": cfg.provider,
+                "model": model_name,
+                "elapsed_ms": round((time.perf_counter() - started) * 1000.0, 3),
+            },
         )
         return vectors
     except Exception:
@@ -253,7 +294,9 @@ async def embed_text(text: str) -> List[float]:
     return vector
 
 
-async def test_embedding_provider(payload: "LLMConfigTestRequest") -> tuple[bool, str | None, int | None]:
+async def test_embedding_provider(
+    payload: "LLMConfigTestRequest",
+) -> tuple[bool, str | None, int | None]:
     """Verify the embeddings operation for the configured provider.
 
     Returns (ok, message, dim).
@@ -264,7 +307,9 @@ async def test_embedding_provider(payload: "LLMConfigTestRequest") -> tuple[bool
     except Exception:
         pass
 
-    embed_provider = payload.embed_provider or ("local" if payload.provider == "vllm" else "openai")
+    embed_provider = payload.embed_provider or (
+        "local" if payload.provider == "vllm" else "openai"
+    )
     if embed_provider == "local":
         model_name = payload.embed_model or LOCAL_EMBED_MODEL_DEFAULT
         try:

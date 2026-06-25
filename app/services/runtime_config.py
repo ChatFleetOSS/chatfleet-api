@@ -113,10 +113,7 @@ async def get_llm_config() -> LLMConfigView:
     col = _col()
     doc = await col.find_one({"_id": "runtime"}) or {}
     provider = doc.get("provider", "openai")
-    default_embed_provider = "local" if provider == "vllm" else "openai"
-    embed_provider = doc.get("embed_provider", default_embed_provider)
-    if provider == "vllm":
-        embed_provider = "local"
+    embed_provider = doc.get("embed_provider", "openai")
 
     retrieval = _retrieval_from_doc(doc)
     cfg = LLMConfigView(
@@ -144,11 +141,10 @@ def _invalidate_cache() -> None:
     _CACHE = None
 
 
-async def set_llm_config(payload: LLMConfigUpdateRequest, actor_id: str) -> LLMConfigView:
-    # Enforce local embeddings when using vLLM to avoid OpenAI dependency mismatches.
+async def set_llm_config(
+    payload: LLMConfigUpdateRequest, actor_id: str
+) -> LLMConfigView:
     embed_provider = payload.embed_provider
-    if payload.provider == "vllm":
-        embed_provider = "local"
     current = await get_llm_config()
     retrieval_payload = current.retrieval.model_dump()
     if payload.retrieval is not None:
@@ -164,12 +160,20 @@ async def set_llm_config(payload: LLMConfigUpdateRequest, actor_id: str) -> LLMC
         "chat_model": payload.chat_model,
         "embed_model": payload.embed_model,
         "embed_provider": embed_provider,
-        "temperature_default": payload.temperature_default if payload.temperature_default is not None else 0.2,
+        "temperature_default": payload.temperature_default
+        if payload.temperature_default is not None
+        else 0.2,
         "top_k_default": retrieval.top_k_default,
         "retrieval": retrieval.model_dump(),
-        "index_dir": str(payload.index_dir) if payload.index_dir is not None else str(settings.index_dir),
-        "upload_dir": str(payload.upload_dir) if payload.upload_dir is not None else str(settings.upload_dir),
-        "max_upload_mb": int(payload.max_upload_mb) if payload.max_upload_mb is not None else int(settings.max_upload_mb),
+        "index_dir": str(payload.index_dir)
+        if payload.index_dir is not None
+        else str(settings.index_dir),
+        "upload_dir": str(payload.upload_dir)
+        if payload.upload_dir is not None
+        else str(settings.upload_dir),
+        "max_upload_mb": int(payload.max_upload_mb)
+        if payload.max_upload_mb is not None
+        else int(settings.max_upload_mb),
         "updated_by": actor_id,
         "updated_at": datetime.now(timezone.utc),
     }
@@ -195,7 +199,9 @@ async def set_verified(ok: bool) -> None:
     if not ok:
         return
     col = _col()
-    await col.update_one({"_id": "runtime"}, {"$set": {"verified_at": datetime.now(timezone.utc)}})
+    await col.update_one(
+        {"_id": "runtime"}, {"$set": {"verified_at": datetime.now(timezone.utc)}}
+    )
     _invalidate_cache()
 
 
@@ -206,11 +212,31 @@ def get_runtime_overrides_sync() -> tuple[Path, Path, int, float, int]:
     environment-backed settings if runtime cache is not warmed.
     """
     cfg = _CACHE[0] if _CACHE else None
-    index_dir = Path(cfg.index_dir) if cfg and getattr(cfg, "index_dir", None) else settings.index_dir
-    upload_dir = Path(cfg.upload_dir) if cfg and getattr(cfg, "upload_dir", None) else settings.upload_dir
-    max_upload_mb = int(cfg.max_upload_mb) if cfg and getattr(cfg, "max_upload_mb", None) else int(settings.max_upload_mb)
-    temperature_default = float(cfg.temperature_default) if cfg and getattr(cfg, "temperature_default", None) else float(settings.temperature_default)
-    top_k_default = int(cfg.top_k_default) if cfg and getattr(cfg, "top_k_default", None) else int(settings.top_k_default)
+    index_dir = (
+        Path(cfg.index_dir)
+        if cfg and getattr(cfg, "index_dir", None)
+        else settings.index_dir
+    )
+    upload_dir = (
+        Path(cfg.upload_dir)
+        if cfg and getattr(cfg, "upload_dir", None)
+        else settings.upload_dir
+    )
+    max_upload_mb = (
+        int(cfg.max_upload_mb)
+        if cfg and getattr(cfg, "max_upload_mb", None)
+        else int(settings.max_upload_mb)
+    )
+    temperature_default = (
+        float(cfg.temperature_default)
+        if cfg and getattr(cfg, "temperature_default", None)
+        else float(settings.temperature_default)
+    )
+    top_k_default = (
+        int(cfg.top_k_default)
+        if cfg and getattr(cfg, "top_k_default", None)
+        else int(settings.top_k_default)
+    )
     return index_dir, upload_dir, max_upload_mb, temperature_default, top_k_default
 
 
